@@ -1,0 +1,19 @@
+/target/
+.DS_Store
+*.swp
+.env
+lox_token.cfg
+
+# Reference material (Loxone spec PDF, Python/Cython reference client) and the
+# perf-benchmark / parity-testing scaffolding: dev-only, not part of the
+# shipped client.
+/refs/
+/benches/
+/scripts/
+/output/
+/examples/capture.rs
+/examples/parity.rs
+comparison_report.txt
+python_parity.txt
+rust_client_output.txt
+rust_parity.txt
