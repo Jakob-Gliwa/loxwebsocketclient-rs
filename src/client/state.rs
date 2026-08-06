@@ -1,11 +1,19 @@
 //! State shared between the façade, the supervisor, the writer and the reader.
 
-use crate::auth::LxToken;
+use crate::auth::{LxToken, TokenStore};
 use crate::metrics::{ConnState, ConnStateCell, MetricsState};
 use crate::sync::lock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tracing::debug;
+
+/// Where the token is kept between runs, and under which identity.
+#[derive(Debug)]
+struct TokenPersistence {
+    store: Arc<dyn TokenStore>,
+    binding: String,
+}
 
 /// Connection state readable by `LoxClient::metrics` and `LoxClient::state`.
 #[derive(Debug)]
@@ -13,6 +21,9 @@ pub(crate) struct SharedState {
     pub(crate) metrics: Arc<MetricsState>,
     state: ConnStateCell,
     token: Mutex<LxToken>,
+    /// Every token mutation in the crate goes through this type, which is what
+    /// makes hanging persistence off it enough to cover all of them.
+    persist: Option<TokenPersistence>,
 }
 
 impl SharedState {
@@ -21,6 +32,17 @@ impl SharedState {
             metrics: MetricsState::new(),
             state: ConnStateCell::default(),
             token: Mutex::new(LxToken::default()),
+            persist: None,
+        })
+    }
+
+    /// As [`Self::new`], with the token mirrored into `store` under `binding`.
+    pub fn with_token_store(store: Arc<dyn TokenStore>, binding: String) -> Arc<Self> {
+        Arc::new(Self {
+            metrics: MetricsState::new(),
+            state: ConnStateCell::default(),
+            token: Mutex::new(LxToken::default()),
+            persist: Some(TokenPersistence { store, binding }),
         })
     }
 
@@ -37,14 +59,52 @@ impl SharedState {
         lock(&self.token).clone()
     }
 
+    /// Replace the token, mirroring it into the store if there is one.
+    ///
+    /// The store is written under the lock so that the saved value always
+    /// matches the last one set — the writer task can clear the token while the
+    /// refresh path is replacing it, and a write outside the lock could land in
+    /// either order. [`TokenStore`] documents the resulting duty to be quick.
     pub fn set_token(&self, token: LxToken) {
-        *lock(&self.token) = token;
+        let mut current = lock(&self.token);
+        *current = token;
+        if let Some(persist) = &self.persist {
+            persist.store.save(&persist.binding, &current);
+        }
     }
 
     /// Forget the token. Only legitimate on an authentication rejection, on a
     /// close code that says the user changed, or on `stop()`.
     pub fn clear_token(&self) {
-        lock(&self.token).clear();
+        let mut current = lock(&self.token);
+        current.clear();
+        if let Some(persist) = &self.persist {
+            persist.store.clear(&persist.binding);
+        }
+    }
+
+    /// Adopt a token left behind by an earlier run, if the store has a usable one.
+    ///
+    /// An expired one is dropped here rather than handed to the handshake: it
+    /// would only be spent on a `refreshjwt` the Miniserver is going to refuse.
+    /// Anything still valid is worth trying even if the Miniserver has since
+    /// forgotten it — the handshake already falls back to acquiring a new one.
+    pub fn restore_token(&self) {
+        let Some(persist) = &self.persist else { return };
+        let Some(token) = persist.store.load(&persist.binding) else {
+            return;
+        };
+        if token.is_empty() || token.seconds_to_expire() <= 0 {
+            debug!("the saved token has expired, discarding it");
+            persist.store.clear(&persist.binding);
+            return;
+        }
+        debug!(
+            expires_in_secs = token.seconds_to_expire(),
+            "reusing the saved token"
+        );
+        // Deliberately not through `set_token`: this is where it came from.
+        *lock(&self.token) = token;
     }
 
     /// `validUntil` of the current token, or `None` when there is none.

@@ -440,6 +440,7 @@ async fn session_once<H: LoxHandler>(
             command_timeout: Duration::from_secs(cfg.command_timeout_secs),
             max_missed_keepalives: cfg.max_missed_keepalives,
             max_pending: cfg.max_pending_commands,
+            kill_token_on_stop: cfg.kill_token_on_stop,
         },
     };
     let writer_task = tokio::spawn(writer.run(cmd_rx, out_rx));

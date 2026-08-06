@@ -52,6 +52,7 @@ pub(crate) struct WriterConfig {
     pub command_timeout: Duration,
     pub max_missed_keepalives: u32,
     pub max_pending: usize,
+    pub kill_token_on_stop: bool,
 }
 
 impl std::fmt::Debug for WriterConfig {
@@ -61,6 +62,7 @@ impl std::fmt::Debug for WriterConfig {
             .field("command_timeout", &self.command_timeout)
             .field("max_missed_keepalives", &self.max_missed_keepalives)
             .field("max_pending", &self.max_pending)
+            .field("kill_token_on_stop", &self.kill_token_on_stop)
             .finish_non_exhaustive()
     }
 }
@@ -325,11 +327,22 @@ impl Writer {
     /// Killing the token keeps the Miniserver's token storage clean; the
     /// protocol document recommends it explicitly. Any failure here is logged
     /// and ignored — shutdown must not hang on an unresponsive Miniserver.
+    ///
+    /// `kill_token_on_stop = false` keeps it alive instead, which is what makes
+    /// a [`TokenStore`] useful across a graceful restart.
+    ///
+    /// [`TokenStore`]: crate::TokenStore
     async fn graceful_close(&mut self) {
-        if let Err(e) = self.kill_token().await {
-            debug!("killtoken skipped: {e}");
+        if self.cfg.kill_token_on_stop {
+            if let Err(e) = self.kill_token().await {
+                debug!("killtoken skipped: {e}");
+            }
+            // Only after killing it: the token is worthless now, so a store
+            // must not keep offering it to the next run.
+            self.shared.clear_token();
+        } else {
+            debug!("leaving the token valid for the next run");
         }
-        self.shared.clear_token();
 
         if let Err(e) = self.write_frame(Frame::close(1000, b"bye")).await {
             debug!("close frame not sent: {e}");

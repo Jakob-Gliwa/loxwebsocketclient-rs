@@ -74,7 +74,7 @@ Caveats worth knowing before choosing a pin mode:
 
 ## Tokens
 
-Tokens are **transient**: held in memory for the process lifetime, never persisted, never exposed through a getter.
+Tokens are held in memory and never exposed through a getter. By default they are also **transient** — each process start acquires a new one; see [Persisting the token](#persisting-the-token) to change that.
 
 | Event | Effect on the token |
 |---|---|
@@ -83,10 +83,32 @@ Tokens are **transient**: held in memory for the process lifetime, never persist
 | `LL` 401 / 403 on `checktoken` / `authwithtoken` | Discarded, new one acquired |
 | `LL` 901 (connection limit reached) | **Kept**; the Miniserver is full, which says nothing about the token. Long backoff |
 | Less than 5 minutes of lifetime left | Replaced; the displaced token is killed server-side |
-| `stop()` | `killtoken` (best effort, short timeout) before the close frame |
+| `stop()` | `killtoken` (best effort, short timeout) before the close frame, unless `kill_token_on_stop` is off |
 | `drop()` without `stop()` | Same graceful shutdown, but nothing waits for it to finish |
 
 `ConnectConfig::token_permission` picks the lifespan class: `TokenPermission::Web` (ID 2, hours) or `TokenPermission::App` (ID 4, weeks, the default). `LoxClient::check_token()` asks the Miniserver whether the current token is still valid without revealing it.
+
+### Persisting the token
+
+Setting `ConnectConfig::token_store` mirrors the token into a `TokenStore`, and a later start authenticates with what it finds there instead of spending a `getkey2` + `getjwt` round trip on a new one. The crate ships `FileTokenStore`, which keeps one token in one file — written atomically, and on Unix created with mode `0600` in a `0700` directory. A keyring-backed store is a stronger choice; implement the trait for it.
+
+```rust
+use loxwebsocket::{ConnectConfig, FileTokenStore};
+use std::sync::Arc;
+
+let cfg = ConnectConfig {
+    // A graceful stop kills the token by default, which would leave the store
+    // holding something already dead.
+    kill_token_on_stop: false,
+    ..ConnectConfig::new("http://192.168.1.5", "user", "pass")
+}
+.with_token_store(Arc::new(FileTokenStore::new("/var/lib/myapp/lox_token.cfg")));
+```
+
+Two things worth knowing:
+
+- A saved token is bound to the Miniserver URL, the user name and the client UUID it was issued for, and is ignored when any of those change. Spelling the same Miniserver two ways costs a fresh token rather than risking the wrong one.
+- The saved file holds bearer material equivalent to the password. Nothing recovers from it leaking except the token expiring, so keep it on storage only the account running the client can read.
 
 ## Connection behaviour
 
@@ -215,7 +237,7 @@ src/
   error.rs / metrics.rs / uuid.rs / sync.rs
   proto/          # header, value, text, daytimer, weather
   crypto/         # AES session (SessionKeys + SaltState), RSA wrap, HMAC
-  auth/           # token lifecycle, getkey2/getjwt/authwithtoken commands
+  auth/           # token lifecycle, getkey2/getjwt/authwithtoken commands, TokenStore
   client/
     mod.rs        # LoxClient façade, ConnectConfig
     connect.rs    # TCP/TLS + WebSocket upgrade, split_ws
@@ -227,7 +249,7 @@ src/
     writer.rs     # write half, salt state, keepalive, shutdown
     pending.rs    # PendingQueue, LL.control correlation
     refresh.rs    # token refresh task
-    state.rs      # shared state, liveness counters
+    state.rs      # shared state, liveness counters, token persistence hook
     keepalive.rs / reconnect.rs / visu.rs / handler.rs
 examples/listen.rs
 ```
@@ -238,7 +260,6 @@ Not part of this repository (local-only, gitignored): `benches/` (criterion suit
 
 - **CloudDNS / Remote Connect is not implemented.** Resolving a Miniserver through `connect.loxonecloud.com` (`GET /getip?snr=…`) and the remote-connect relay — the headline feature of protocol version 17.0 — is missing. Only direct addresses work: a local IP or hostname, or a port-forwarded public one.
 - No chain validation against the Loxone Root Certificate, and no hostname verification in the pin modes (see [TLS](#tls)).
-- Tokens do not survive a process restart; each start acquires or re-acquires one.
 - `rsa` 0.9 carries [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071) (Marvin Attack). It is accepted in `.cargo/audit.toml` because the advisory covers private-key operations and this crate only ever encrypts with the Miniserver's public key. Revisit when `rsa` 0.10 ships.
 
 ## License

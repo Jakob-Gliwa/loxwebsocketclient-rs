@@ -29,10 +29,11 @@ pub use reconnect::describe_close_code;
 pub use tls::{TlsContext, TlsMode};
 
 use crate::auth::flow::CMD_GET_KEY;
+use crate::auth::store::token_binding;
 use crate::auth::token::Redacted;
 use crate::auth::{
-    DEFAULT_CLIENT_INFO, DEFAULT_CLIENT_UUID, TokenPermission, build_token_hash, cmd_check_token,
-    payload_ll_status,
+    DEFAULT_CLIENT_INFO, DEFAULT_CLIENT_UUID, TokenPermission, TokenStore, build_token_hash,
+    cmd_check_token, payload_ll_status,
 };
 use crate::error::{Error, Result};
 use crate::metrics::{ConnState, LoxMetrics};
@@ -90,6 +91,20 @@ pub struct ConnectConfig {
     pub max_missed_keepalives: u32,
     /// Ceiling on pipelined commands; further `send_command` calls fail fast.
     pub max_pending_commands: usize,
+    /// Where to keep the token between process runs. `None` — the default —
+    /// means a fresh token is acquired on every start.
+    ///
+    /// See [`TokenStore`] for what a store is and is not good for, and
+    /// [`FileTokenStore`](crate::FileTokenStore) for the one this crate ships.
+    pub token_store: Option<Arc<dyn TokenStore>>,
+    /// Send `killtoken` during [`LoxClient::stop`], invalidating the token on
+    /// the Miniserver. Defaults to `true`, which keeps its token storage clean
+    /// as the protocol document recommends.
+    ///
+    /// Turn it off to let a [`token_store`](Self::token_store) survive a
+    /// graceful restart; the token then stays valid until it expires, whether
+    /// or not this client comes back.
+    pub kill_token_on_stop: bool,
 }
 
 impl std::fmt::Debug for ConnectConfig {
@@ -112,6 +127,8 @@ impl std::fmt::Debug for ConnectConfig {
             .field("read_idle_timeout_secs", &self.read_idle_timeout_secs)
             .field("max_missed_keepalives", &self.max_missed_keepalives)
             .field("max_pending_commands", &self.max_pending_commands)
+            .field("token_store", &self.token_store)
+            .field("kill_token_on_stop", &self.kill_token_on_stop)
             .finish()
     }
 }
@@ -141,7 +158,19 @@ impl ConnectConfig {
             read_idle_timeout_secs: READ_IDLE_TIMEOUT_SECS,
             max_missed_keepalives: MAX_MISSED_KEEPALIVES,
             max_pending_commands: MAX_PENDING_COMMANDS,
+            token_store: None,
+            kill_token_on_stop: true,
         }
+    }
+
+    /// Keep the token in `store`, so a restart can re-use it.
+    ///
+    /// Convenience for setting [`token_store`](Self::token_store); pair it with
+    /// `kill_token_on_stop = false` if graceful restarts should re-use the
+    /// token too.
+    pub fn with_token_store(mut self, store: Arc<dyn TokenStore>) -> Self {
+        self.token_store = Some(store);
+        self
     }
 }
 
@@ -174,7 +203,17 @@ impl<H: LoxHandler> LoxClient<H> {
     /// Waits until the initial key-exchange + token auth succeeds. Lifecycle
     /// events are also delivered via [`LoxHandler::on_event`].
     pub async fn connect(cfg: ConnectConfig, handler: H) -> Result<Self> {
-        let shared = SharedState::new();
+        let shared = match &cfg.token_store {
+            Some(store) => {
+                let binding = token_binding(&cfg.loxone_url, &cfg.username, &cfg.client_uuid);
+                let shared = SharedState::with_token_store(Arc::clone(store), binding);
+                // Before the handshake, so it can authenticate with whatever an
+                // earlier run left behind instead of acquiring a new token.
+                shared.restore_token();
+                shared
+            }
+            None => SharedState::new(),
+        };
         let stopped = Arc::new(AtomicBool::new(false));
         let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_DEPTH);
         let (ready_tx, ready_rx) = oneshot::channel();

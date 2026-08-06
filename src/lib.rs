@@ -41,7 +41,7 @@ pub mod proto;
 pub(crate) mod sync;
 pub mod uuid;
 
-pub use auth::{LOXONE_EPOCH, LxToken, TokenPermission};
+pub use auth::{FileTokenStore, LOXONE_EPOCH, LxToken, TokenPermission, TokenStore};
 pub use client::{
     ApiInfo, CONTROL_KEY_SCAN_LIMIT, CONTROL_VALUE_LIMIT, ChannelHandler, ClientEvent,
     ConnectConfig, HttpClient, LoxClient, LoxHandler, OwnedEvent, TlsContext, TlsMode,
