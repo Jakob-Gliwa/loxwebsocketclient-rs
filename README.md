@@ -1,8 +1,10 @@
 # loxwebsocket
 
+[![CI](https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/actions/workflows/ci.yml)
+
 High-performance Rust WebSocket client for the [Loxone Miniserver](https://www.loxone.com/) (protocol V17.0).
 
-Targets Miniserver firmware v15 and newer; the legacy `gettoken` / `refreshtoken` paths are gone. MSRV is 1.86.
+Targets Miniserver firmware v15 and newer; the legacy `gettoken` / `refreshtoken` paths are gone. Edition 2024, MSRV 1.86 (verified in CI against the committed `Cargo.lock`).
 
 ## Design
 
@@ -237,7 +239,8 @@ Not part of this repository (local-only, gitignored): `benches/` (criterion suit
 - **CloudDNS / Remote Connect is not implemented.** Resolving a Miniserver through `connect.loxonecloud.com` (`GET /getip?snr=…`) and the remote-connect relay — the headline feature of protocol version 17.0 — is missing. Only direct addresses work: a local IP or hostname, or a port-forwarded public one.
 - No chain validation against the Loxone Root Certificate, and no hostname verification in the pin modes (see [TLS](#tls)).
 - Tokens do not survive a process restart; each start acquires or re-acquires one.
-- `Cargo.toml`'s `repository` field still points at a placeholder URL.
+- A panicking [`LoxHandler`](src/client/handler.rs) takes the IO supervisor down with it: the reader runs inline on that task and nothing catches the unwind, so `state()` keeps reporting `Connected` and no reconnect follows.
+- `rsa` 0.9 carries [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071) (Marvin Attack). It is accepted in `.cargo/audit.toml` because the advisory covers private-key operations and this crate only ever encrypts with the Miniserver's public key. Revisit when `rsa` 0.10 ships.
 
 ## License
 

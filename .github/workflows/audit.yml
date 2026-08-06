@@ -1,0 +1,38 @@
+name: Security audit
+
+# Advisories appear without the dependency graph changing, so this runs on a
+# schedule as well as whenever the manifest or lockfile moves.
+on:
+  push:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .cargo/audit.toml
+      - .github/workflows/audit.yml
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - .cargo/audit.toml
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # Accepted advisories and the reasoning live in .cargo/audit.toml.
+      - name: Audit
+        run: cargo audit

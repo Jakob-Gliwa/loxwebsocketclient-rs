@@ -1,0 +1,12 @@
+# RUSTSEC-2023-0071 — "Marvin Attack" timing sidechannel in the `rsa` crate.
+#
+# The advisory covers RSA *private key* operations: an attacker able to submit
+# ciphertexts and measure decryption timing can recover the key. This crate
+# never performs one. `wrap_session_key` (src/crypto/rsa_key.rs) encrypts the
+# AES session key with the Miniserver's *public* key, and `RsaPrivateKey` does
+# not appear outside the unit tests.
+#
+# There is no fixed release on the 0.9 line; drop this entry once `rsa` 0.10
+# is out and the crate has moved to it.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]

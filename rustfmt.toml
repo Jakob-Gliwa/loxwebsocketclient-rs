@@ -1,0 +1,4 @@
+# Pinned explicitly rather than inherited from `edition` in Cargo.toml, so the
+# formatting stays identical when the crate edition moves on and when rustfmt
+# is invoked directly instead of through `cargo fmt`.
+style_edition = "2024"
