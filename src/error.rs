@@ -77,6 +77,15 @@ pub enum Error {
     #[error("connection is not local")]
     NotLocal,
 
+    /// A [`LoxHandler`] callback unwound. The panic is absorbed so the IO task
+    /// survives long enough to shut down cleanly, but the client stops: the
+    /// handler's own state is in doubt from that point, and reconnecting would
+    /// only feed the same bug.
+    ///
+    /// [`LoxHandler`]: crate::LoxHandler
+    #[error("the event handler panicked")]
+    HandlerPanic,
+
     #[error("client stopped")]
     Stopped,
 
@@ -119,7 +128,10 @@ impl Error {
     ///
     /// [`ClientEvent::Closed`]: crate::ClientEvent::Closed
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::NotLocal | Self::UserDisabled)
+        matches!(
+            self,
+            Self::NotLocal | Self::UserDisabled | Self::HandlerPanic
+        )
     }
 
     /// Whether this condition needs minutes rather than seconds to clear.

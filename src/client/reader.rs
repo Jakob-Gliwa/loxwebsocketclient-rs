@@ -8,7 +8,7 @@
 
 use crate::auth::{CMD_GET_VISUAL_PASSWD, parse_key_salt};
 use crate::client::connect::AbortableRead;
-use crate::client::handler::LoxHandler;
+use crate::client::handler::{HandlerGuard, LoxHandler};
 use crate::client::keepalive::read_timeout;
 use crate::client::pending::{PendingQueue, cmd_label, extract_ll_control};
 use crate::client::state::{Liveness, SharedState};
@@ -90,7 +90,7 @@ impl Reader {
     pub async fn run<H: LoxHandler>(
         &mut self,
         ws: &mut FragmentCollectorRead<AbortableRead>,
-        handler: &mut H,
+        handler: &mut HandlerGuard<H>,
     ) -> ReadOutcome {
         let mut expect = FrameExpect::START;
 
@@ -151,7 +151,7 @@ impl Reader {
         &mut self,
         expect: &mut FrameExpect,
         payload: &[u8],
-        handler: &mut H,
+        handler: &mut HandlerGuard<H>,
     ) -> Result<Option<ReadOutcome>> {
         match *expect {
             FrameExpect::Header { .. } => match parse_header(payload) {
@@ -198,12 +198,18 @@ impl Reader {
         &mut self,
         msg_type: u8,
         payload: &[u8],
-        handler: &mut H,
+        handler: &mut HandlerGuard<H>,
     ) -> Result<()> {
         self.shared.metrics.record_message(msg_type);
-        handler.on_raw_payload(msg_type, payload);
 
-        if dispatch_event(msg_type, payload, handler) {
+        // One guard for the whole message: `dispatch_event` turns a single
+        // frame into thousands of per-record callbacks, so the unwind edge
+        // belongs out here rather than around each one.
+        let dispatched = handler.guard_or_fail("event dispatch", |h| {
+            h.on_raw_payload(msg_type, payload);
+            dispatch_event(msg_type, payload, h)
+        })?;
+        if dispatched {
             return Ok(());
         }
 
@@ -215,7 +221,7 @@ impl Reader {
                         .metrics
                         .set_keepalive_rtt_ms(sent.elapsed().as_secs_f64() * 1000.0);
                 }
-                handler.on_keepalive();
+                handler.guard_or_fail("on_keepalive", |h| h.on_keepalive())?;
             }
             _ => {}
         }
@@ -226,7 +232,7 @@ impl Reader {
     async fn on_text_message<H: LoxHandler>(
         &mut self,
         payload: &[u8],
-        handler: &mut H,
+        handler: &mut HandlerGuard<H>,
     ) -> Result<()> {
         // Cheap bounded scan instead of a DOM: `data/LoxAPP3.json` alone is
         // several megabytes and would otherwise be parsed on every arrival.
@@ -248,7 +254,7 @@ impl Reader {
                 .metrics
                 .unsolicited_responses
                 .fetch_add(1, Ordering::Relaxed);
-            handler.on_json(payload);
+            handler.guard_or_fail("on_json", |h| h.on_json(payload))?;
             return Ok(());
         };
 

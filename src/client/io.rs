@@ -7,7 +7,7 @@
 
 use crate::client::ConnectConfig;
 use crate::client::connect::{Endpoints, split_ws, ws_connect};
-use crate::client::handler::{ClientEvent, LoxHandler};
+use crate::client::handler::{ClientEvent, HandlerGuard, LoxHandler};
 use crate::client::handshake::Handshake;
 use crate::client::http::HttpClient;
 use crate::client::keepalive::{PRODUCTIVE_SESSION_SECS, SHUTDOWN_JOIN_TIMEOUT_SECS};
@@ -98,13 +98,17 @@ struct SessionResult {
 /// if the initial connect fails.
 pub async fn run_supervisor<H: LoxHandler>(
     cfg: ConnectConfig,
-    mut handler: H,
+    handler: H,
     cmd_tx: mpsc::Sender<IoCommand>,
     cmd_rx: mpsc::Receiver<IoCommand>,
     shared: Arc<SharedState>,
     stopped: Arc<AtomicBool>,
     mut ready: Option<oneshot::Sender<Result<()>>>,
 ) {
+    // The reader runs inline on this task, so an unwinding callback would take
+    // the supervisor with it and leave the client wedged in `Connected`.
+    let mut handler = HandlerGuard::new(handler);
+
     let setup = Endpoints::from_loxone_url(&cfg.loxone_url)
         .and_then(|endpoints| TlsContext::new(cfg.tls.clone()).map(|tls| (tls, endpoints)));
     let (tls, endpoints) = match setup {
@@ -132,6 +136,17 @@ pub async fn run_supervisor<H: LoxHandler>(
     loop {
         if ctx.stopped.load(Ordering::Relaxed) {
             finish(&ctx.shared, &mut handler, &mut ready, Some(Error::Stopped));
+            return;
+        }
+        // Backstop for an unwind in a lifecycle callback, which — unlike the
+        // reader path — has no error to propagate.
+        if handler.panicked() {
+            finish(
+                &ctx.shared,
+                &mut handler,
+                &mut ready,
+                Some(Error::HandlerPanic),
+            );
             return;
         }
 
@@ -172,7 +187,7 @@ pub async fn run_supervisor<H: LoxHandler>(
                     close_code
                 );
                 ctx.shared.metrics.mark_disconnected(close_code);
-                handler.on_event(ClientEvent::ConnectionClosed { close_code });
+                handler.lifecycle(ClientEvent::ConnectionClosed { close_code });
                 if !token_survives_close(close_code) {
                     debug!("close code invalidates the token, discarding it");
                     ctx.shared.clear_token();
@@ -217,7 +232,7 @@ pub async fn run_supervisor<H: LoxHandler>(
 /// Terminal bookkeeping: state, pending `ready` and the `Closed` event.
 fn finish<H: LoxHandler>(
     shared: &SharedState,
-    handler: &mut H,
+    handler: &mut HandlerGuard<H>,
     ready: &mut Option<oneshot::Sender<Result<()>>>,
     error: Option<Error>,
 ) {
@@ -225,13 +240,13 @@ fn finish<H: LoxHandler>(
     if let Some(tx) = ready.take() {
         let _ = tx.send(Err(error.unwrap_or(Error::Stopped)));
     }
-    handler.on_event(ClientEvent::Closed);
+    handler.lifecycle(ClientEvent::Closed);
 }
 
 async fn wait_reconnect<H: LoxHandler>(
     ctx: &SessionCtx,
     attempt: &mut u32,
-    handler: &mut H,
+    handler: &mut HandlerGuard<H>,
     backoff: Backoff,
 ) -> bool {
     if !should_continue(*attempt, ctx.cfg.max_reconnect_attempts) {
@@ -240,7 +255,7 @@ async fn wait_reconnect<H: LoxHandler>(
             ctx.cfg.max_reconnect_attempts
         );
         ctx.shared.set_state(ConnState::Closed);
-        handler.on_event(ClientEvent::Closed);
+        handler.lifecycle(ClientEvent::Closed);
         return false;
     }
 
@@ -259,7 +274,7 @@ async fn wait_reconnect<H: LoxHandler>(
 
     if !sleep_unless_stopped(Duration::from_secs(delay), &ctx.stopped).await {
         ctx.shared.set_state(ConnState::Closed);
-        handler.on_event(ClientEvent::Closed);
+        handler.lifecycle(ClientEvent::Closed);
         return false;
     }
     true
@@ -313,7 +328,7 @@ async fn preflight(ctx: &SessionCtx) -> Result<()> {
 
 async fn session_once<H: LoxHandler>(
     ctx: &SessionCtx,
-    handler: &mut H,
+    handler: &mut HandlerGuard<H>,
     cmd_rx: mpsc::Receiver<IoCommand>,
     is_reconnect: bool,
     ready: &mut Option<oneshot::Sender<Result<()>>>,
@@ -395,10 +410,10 @@ async fn session_once<H: LoxHandler>(
             .metrics
             .reconnects
             .fetch_add(1, Ordering::Relaxed);
-        handler.on_event(ClientEvent::Reconnected);
+        handler.lifecycle(ClientEvent::Reconnected);
     } else {
         ctx.shared.metrics.connects.fetch_add(1, Ordering::Relaxed);
-        handler.on_event(ClientEvent::Connected);
+        handler.lifecycle(ClientEvent::Connected);
     }
     if let Some(tx) = ready.take() {
         let _ = tx.send(Ok(()));

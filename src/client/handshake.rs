@@ -13,7 +13,7 @@ use crate::auth::{
 };
 use crate::client::ConnectConfig;
 use crate::client::connect::{AbortableRead, WsWriteHalf};
-use crate::client::handler::LoxHandler;
+use crate::client::handler::{HandlerGuard, LoxHandler};
 use crate::client::pending::cmd_label;
 use crate::client::reader::dispatch_event;
 use crate::client::state::SharedState;
@@ -45,7 +45,7 @@ pub(crate) struct Handshake<'a, H> {
     pub cfg: &'a ConnectConfig,
     /// Only used for event tables that overtake a handshake answer; see
     /// [`Handshake::read_payload`].
-    pub handler: &'a mut H,
+    pub handler: &'a mut HandlerGuard<H>,
 }
 
 impl<H> std::fmt::Debug for Handshake<'_, H> {
@@ -244,11 +244,16 @@ impl<H: LoxHandler> Handshake<'_, H> {
                 self.read_frame_bytes(wait).await?
             };
             if hdr.identifier == MessageType::Text as u8 {
-                self.handler.on_raw_payload(hdr.identifier, &payload);
+                self.handler.guard_or_fail("on_raw_payload", |h| {
+                    h.on_raw_payload(hdr.identifier, &payload)
+                })?;
                 return Ok(payload);
             }
-            self.handler.on_raw_payload(hdr.identifier, &payload);
-            if !dispatch_event(hdr.identifier, &payload, self.handler) {
+            let dispatched = self.handler.guard_or_fail("event dispatch", |h| {
+                h.on_raw_payload(hdr.identifier, &payload);
+                dispatch_event(hdr.identifier, &payload, h)
+            })?;
+            if !dispatched {
                 debug!(
                     identifier = hdr.identifier,
                     "ignoring non-event message while waiting for a handshake answer"
