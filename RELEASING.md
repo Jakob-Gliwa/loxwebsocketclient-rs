@@ -43,7 +43,9 @@ messages are unhelpful:
   renaming the workflow file or the environment stops publishing until the
   configuration is updated to match.
 - GitHub, Settings, Environments, `release`: required reviewer, and deployments
-  restricted to tags matching `v*`.
+  restricted to tags matching `v*` plus the `main` branch. `main` is on the list
+  only so the `dry_run` dispatch above can reach the environment; the approval
+  is what actually guards publishing.
 
 Version 0.1.0 was published once by hand with a temporary API token that was
 revoked afterwards, because Trusted Publishing cannot create a crate that does
