@@ -7,20 +7,20 @@
 //! `salt` / `nextSalt` sequence the Miniserver expects.
 
 use crate::error::{Error, Result};
-use aes::Aes256;
 use aes::cipher::block::{BlockModeDecrypt, BlockModeEncrypt};
-use aes::cipher::{KeyIvInit, block_padding::NoPadding};
+use aes::cipher::{InnerIvInit, KeyInit, KeyIvInit, block_padding::NoPadding};
+use aes::{Aes256, Aes256Enc};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use cbc::{Decryptor, Encryptor};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use rand::RngCore;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-type Aes256CbcEnc = Encryptor<Aes256>;
+type Aes256CbcEnc = Encryptor<Aes256Enc>;
 type Aes256CbcDec = Decryptor<Aes256>;
 
 pub const IV_BYTES: usize = 16;
 pub const AES_KEY_SIZE: usize = 32;
+pub const AES_BLOCK_SIZE: usize = 16;
 pub const SALT_BYTES: usize = 16;
 pub const SALT_MAX_AGE_SECONDS: u64 = 60 * 60;
 pub const SALT_MAX_USE_COUNT: u32 = 30;
@@ -33,6 +33,16 @@ pub const CMD_ENCRYPT: &str = "jdev/sys/enc/";
 pub struct SessionKeys {
     key: [u8; AES_KEY_SIZE],
     iv: [u8; IV_BYTES],
+    /// Round keys, expanded once per session.
+    ///
+    /// The key schedule dominated the per-command cost: every command used to
+    /// build an `Encryptor` from the raw key, and expanding an AES-256 schedule
+    /// is far more work than encrypting the three or four blocks a command
+    /// occupies. Cloning this instead is a memcpy of the round keys.
+    ///
+    /// The raw `key` stays because [`Self::session_payload`] and the decrypt
+    /// path still need it, and because the schedule cannot be run backwards.
+    cipher: Aes256Enc,
 }
 
 impl std::fmt::Debug for SessionKeys {
@@ -55,12 +65,16 @@ impl SessionKeys {
         let mut rng = rand::thread_rng();
         rng.fill_bytes(&mut key);
         rng.fill_bytes(&mut iv);
-        Self { key, iv }
+        Self::from_key_iv(key, iv)
     }
 
     /// Construct with fixed key/iv (for tests).
     pub fn from_key_iv(key: [u8; AES_KEY_SIZE], iv: [u8; IV_BYTES]) -> Self {
-        Self { key, iv }
+        Self {
+            cipher: Aes256Enc::new((&key).into()),
+            key,
+            iv,
+        }
     }
 
     pub fn key(&self) -> &[u8; AES_KEY_SIZE] {
@@ -102,11 +116,32 @@ impl SessionKeys {
 /// A default-constructed value is already "reset": the first encrypted command
 /// emits `salt/{salt}/{cmd}`. Reusing a `SaltState` across connections would
 /// emit `nextSalt/{stale}/…` and earn a spurious 401.
-#[derive(Debug, Clone, Default)]
+///
+/// The two scratch buffers make [`Self::encrypt`] reuse one plaintext and one
+/// Base64 allocation across commands instead of drawing fresh ones each time.
+/// They are sound precisely because a `SaltState` already belongs to exactly
+/// one task — the writer — for the same reason the salt sequence does.
+#[derive(Clone, Default)]
 pub struct SaltState {
     salt: String,
     salt_used_count: u32,
     salt_time_stamp: u64,
+    /// Salted plaintext, then the ciphertext encrypted over it in place.
+    scratch: Vec<u8>,
+    /// Base64 of `scratch`, before percent-encoding.
+    encoded: Vec<u8>,
+}
+
+/// Prints the salt sequence but not the scratch buffers, which hold the last
+/// command in plaintext and in ciphertext.
+impl std::fmt::Debug for SaltState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaltState")
+            .field("salt", &self.salt)
+            .field("salt_used_count", &self.salt_used_count)
+            .field("salt_time_stamp", &self.salt_time_stamp)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SaltState {
@@ -119,6 +154,8 @@ impl SaltState {
         self.salt.clear();
         self.salt_used_count = 0;
         self.salt_time_stamp = 0;
+        self.scratch.clear();
+        self.encoded.clear();
     }
 
     /// Currently active salt (empty before the first command).
@@ -133,15 +170,13 @@ impl SaltState {
             .unwrap_or(0)
     }
 
-    fn generate_salt(&mut self) -> String {
+    fn generate_salt(&mut self) {
         let mut raw = [0u8; SALT_BYTES];
         rand::thread_rng().fill_bytes(&mut raw);
         // Python uses pathname2url(hex) — hex is already URL-safe.
-        let salt = hex::encode(raw);
+        self.salt = hex::encode(raw);
         self.salt_time_stamp = Self::now_secs();
         self.salt_used_count = 0;
-        self.salt = salt.clone();
-        salt
     }
 
     fn new_salt_needed(&mut self) -> bool {
@@ -150,29 +185,94 @@ impl SaltState {
             || Self::now_secs().saturating_sub(self.salt_time_stamp) > SALT_MAX_AGE_SECONDS
     }
 
-    /// Build the salted plaintext for `command`, advancing the salt state.
-    pub fn salted_plaintext(&mut self, command: &str) -> String {
+    /// Write the salted plaintext for `command` into [`Self::scratch`],
+    /// advancing the salt state.
+    fn fill_salted_plaintext(&mut self, command: &str) {
+        self.scratch.clear();
         if !self.salt.is_empty() && self.new_salt_needed() {
-            let prev = self.salt.clone();
-            let next = self.generate_salt();
-            format!("nextSalt/{prev}/{next}/{command}\0")
+            // Reuses the outgoing salt's allocation rather than cloning it;
+            // this branch runs once per `SALT_MAX_USE_COUNT` commands anyway.
+            let previous = std::mem::take(&mut self.salt);
+            self.generate_salt();
+            self.scratch.extend_from_slice(b"nextSalt/");
+            self.scratch.extend_from_slice(previous.as_bytes());
+            self.scratch.push(b'/');
         } else {
             if self.salt.is_empty() {
                 self.generate_salt();
             }
-            format!("salt/{}/{command}\0", self.salt)
+            self.scratch.extend_from_slice(b"salt/");
         }
+        self.scratch.extend_from_slice(self.salt.as_bytes());
+        self.scratch.push(b'/');
+        self.scratch.extend_from_slice(command.as_bytes());
+        self.scratch.push(0);
+    }
+
+    /// Build the salted plaintext for `command`, advancing the salt state.
+    pub fn salted_plaintext(&mut self, command: &str) -> String {
+        self.fill_salted_plaintext(command);
+        String::from_utf8_lossy(&self.scratch).into_owned()
     }
 
     /// Encrypt a plaintext command into `jdev/sys/enc/{percent-encoded-b64}`.
+    ///
+    /// Everything up to the returned `String` happens in the two scratch
+    /// buffers: the plaintext is zero-padded and encrypted where it was
+    /// written, Base64 goes straight into the second buffer, and the percent
+    /// encoding is appended to the one output allocation. What used to be five
+    /// allocations and a key schedule per command is now one allocation.
     pub fn encrypt(&mut self, keys: &SessionKeys, command: &str) -> Result<String> {
-        let plaintext = self.salted_plaintext(command);
-        let encrypted = aes_encrypt_zerobyte(&keys.key, &keys.iv, plaintext.as_bytes())?;
-        let encoded = B64.encode(encrypted);
-        // URI-component-encode (encodeURIComponent): encode `/` too.
-        let encoded_url = utf8_percent_encode(&encoded, NON_ALPHANUMERIC).to_string();
-        Ok(format!("{CMD_ENCRYPT}{encoded_url}"))
+        self.fill_salted_plaintext(command);
+        // Loxone's ZeroBytePadding: pad with 0x00 to the block size, and pad
+        // nothing at all when the plaintext already ends on a boundary.
+        let padded = self.scratch.len().next_multiple_of(AES_BLOCK_SIZE);
+        self.scratch.resize(padded, 0);
+        Aes256CbcEnc::inner_iv_init(keys.cipher.clone(), (&keys.iv).into())
+            .encrypt_padded::<NoPadding>(&mut self.scratch, padded)
+            .map_err(|_| Error::crypto("AES encrypt failed"))?;
+
+        let b64_len = padded.div_ceil(3) * 4;
+        self.encoded.resize(b64_len, 0);
+        let written = B64
+            .encode_slice(&self.scratch, &mut self.encoded)
+            .map_err(|_| Error::crypto("base64 buffer too small"))?;
+        let encoded = std::str::from_utf8(&self.encoded[..written])
+            .map_err(|_| Error::crypto("base64 produced non-ASCII"))?;
+
+        // Worst case every Base64 byte needs escaping; over-reserving a few
+        // hundred bytes is cheaper than a realloc mid-encode.
+        let mut out = String::with_capacity(CMD_ENCRYPT.len() + 3 * written);
+        out.push_str(CMD_ENCRYPT);
+        percent_encode_base64(encoded, &mut out);
+        Ok(out)
     }
+}
+
+/// Percent-encode Base64 into `out` exactly as `encodeURIComponent` would.
+///
+/// Of the Base64 alphabet only `+`, `/` and `=` are not URI-unreserved, so this
+/// is byte-identical to `utf8_percent_encode(_, NON_ALPHANUMERIC)` for Base64
+/// input — pinned by `percent_encoding_matches_the_general_encoder`. The
+/// general encoder has to walk every character through a `Cow` iterator;
+/// copying the alphanumeric runs wholesale skips that.
+///
+/// Input outside the Base64 alphabet is passed through rather than escaped, so
+/// this is not a general-purpose URI encoder.
+pub fn percent_encode_base64(encoded: &str, out: &mut String) {
+    let mut run_start = 0;
+    for (i, byte) in encoded.bytes().enumerate() {
+        let escape = match byte {
+            b'+' => "%2B",
+            b'/' => "%2F",
+            b'=' => "%3D",
+            _ => continue,
+        };
+        out.push_str(&encoded[run_start..i]);
+        out.push_str(escape);
+        run_start = i + 1;
+    }
+    out.push_str(&encoded[run_start..]);
 }
 
 /// Strip the `salt/{salt}/` or `nextSalt/{prev}/{next}/` prefix from a decrypted
@@ -228,6 +328,71 @@ pub fn aes_decrypt_zerobyte(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+
+    /// The pipeline [`SaltState::encrypt`] replaced, kept verbatim as its
+    /// oracle: allocate per stage, and percent-encode with the general encoder.
+    fn reference_encrypt(keys: &SessionKeys, plaintext: &str) -> String {
+        let encrypted = aes_encrypt_zerobyte(&keys.key, &keys.iv, plaintext.as_bytes()).unwrap();
+        let encoded = B64.encode(encrypted);
+        let encoded_url = utf8_percent_encode(&encoded, NON_ALPHANUMERIC).to_string();
+        format!("{CMD_ENCRYPT}{encoded_url}")
+    }
+
+    /// Byte-for-byte agreement with the old implementation, over commands whose
+    /// salted plaintext lands on either side of every block boundary.
+    #[test]
+    fn encrypt_matches_the_reference_pipeline() {
+        let keys = SessionKeys::from_key_iv([0x31u8; 32], [0x41u8; 16]);
+        for len in 0..64 {
+            let command = "x".repeat(len);
+            let mut salt = SaltState::new();
+            let wire = salt.encrypt(&keys, &command).unwrap();
+
+            // Recovering the plaintext through the decrypt path gives the
+            // reference the exact input `encrypt` used, salt and all. The
+            // terminator goes back on: `rstrip(0)` took it off with the padding.
+            let plain = keys.decrypt_control_response(&wire).unwrap();
+            assert_eq!(strip_salt_prefix(&plain), command);
+            assert_eq!(wire, reference_encrypt(&keys, &format!("{plain}\0")));
+        }
+    }
+
+    /// [`percent_encode_base64`] only special-cases `+`, `/` and `=`. That
+    /// is only safe because nothing else in the Base64 alphabet needs escaping,
+    /// which this pins against the general encoder over random input.
+    #[test]
+    fn percent_encoding_matches_the_general_encoder() {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        for len in 0..96 {
+            // Every remainder mod 3, so all three `=` padding cases appear.
+            let raw: Vec<u8> = (0..len).map(|_| rng.r#gen()).collect();
+            let encoded = B64.encode(&raw);
+            let mut ours = String::new();
+            percent_encode_base64(&encoded, &mut ours);
+            assert_eq!(
+                ours,
+                utf8_percent_encode(&encoded, NON_ALPHANUMERIC).to_string(),
+                "input {raw:02x?}"
+            );
+        }
+    }
+
+    /// The runs the fast path copies wholesale must survive being adjacent to,
+    /// or made entirely of, escaped bytes.
+    #[test]
+    fn percent_encoding_handles_runs_of_escapes() {
+        for input in ["", "+", "///", "+/=", "A+B/C=", "====", "AAAA"] {
+            let mut ours = String::new();
+            percent_encode_base64(input, &mut ours);
+            assert_eq!(
+                ours,
+                utf8_percent_encode(input, NON_ALPHANUMERIC).to_string(),
+                "input {input:?}"
+            );
+        }
+    }
 
     #[test]
     fn roundtrip_zerobyte_padding() {
@@ -248,10 +413,26 @@ mod tests {
         let mut salt = SaltState::new();
         let enc = salt.encrypt(&keys, "jdev/sys/getkey").unwrap();
         assert!(enc.starts_with(CMD_ENCRYPT));
-        // Must be percent-encoded (no raw '+' or '/' from base64 left unencoded).
+        // Must be percent-encoded (no raw '+', '/' or '=' from base64 left
+        // unencoded).
         let body = &enc[CMD_ENCRYPT.len()..];
         assert!(!body.contains('/'));
         assert!(!body.contains('+'));
+        assert!(!body.contains('='));
+    }
+
+    /// The scratch buffers are reused, so a shorter command must not leave a
+    /// longer predecessor's tail behind.
+    #[test]
+    fn a_reused_salt_state_does_not_carry_the_previous_command_over() {
+        let keys = SessionKeys::from_key_iv([0x9au8; 32], [0x0eu8; 16]);
+        let mut reused = SaltState::new();
+        reused.encrypt(&keys, &"long".repeat(50)).unwrap();
+        let wire = reused.encrypt(&keys, "short").unwrap();
+
+        let plain = keys.decrypt_control_response(&wire).unwrap();
+        assert_eq!(strip_salt_prefix(&plain), "short");
+        assert_eq!(wire, reference_encrypt(&keys, &format!("{plain}\0")));
     }
 
     #[test]

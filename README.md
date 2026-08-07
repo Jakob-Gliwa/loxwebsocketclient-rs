@@ -167,10 +167,27 @@ Dropping a `LoxClient` without calling `stop()` requests the same shutdown — t
 | `walk_daytimers/100x10` | 971 ns |
 | `walk_weather/100x10` | 1.15 µs |
 | `parse_header/exact` | 4.9 ns |
-| `salt_state_encrypt/short` — 50-byte command | 5.56 µs |
+| `salt_state_encrypt/short` — 50-byte command | 184 ns |
 | `control_correlation/compare_wire` — the echo comparison the reader does | 7.4 ns |
 | `control_correlation/decrypt_echo` — recovering the plaintext instead | 3.55 µs |
 | `uuid_map_lookup` — 1000 lookups, raw key vs. formatted `String` key | 15.9 µs vs. 36.0 µs |
+
+`salt_state_encrypt/short` was 5.56 µs until the encryption path was fused, which put it *behind* `pycryptodome` doing the same step (5.23 µs, of which 2.31 µs was `AES.new`) and meant none of the migration's gain came from the crypto. The `encrypt_stages` group splits the current figure so a regression stays attributable — these five are from a separate run and only comparable with each other:
+
+| Stage | Median |
+|---|---|
+| `encrypt_stages/key_schedule` — an AES-256 expansion, what every command used to pay | 115 ns |
+| `encrypt_stages/aes_only` — cloning the session's round keys, then CBC over six blocks | 17.2 ns |
+| `encrypt_stages/b64` — `encode_slice` into the scratch buffer | 21.8 ns |
+| `encrypt_stages/percent` — the Base64-specific encoder, including the output allocation | 97.9 ns |
+| `encrypt_stages/percent_general_encoder` — `utf8_percent_encode(_, NON_ALPHANUMERIC)`, what it replaced | 160 ns |
+| `encrypt_stages/total` | 186 ns |
+
+Three changes account for the 30×, and the stage table says which mattered:
+
+- The key schedule is expanded once per session and lives in `SessionKeys`. Per command that leaves a 240-byte memcpy of the round keys, which is why `aes_only` is a twentieth of `key_schedule`. The schedule dwarfed the encryption because a command is only a handful of blocks.
+- The plaintext is written into a scratch buffer owned by `SaltState` (exclusively the writer task's, like the salt sequence itself), padded in place and encrypted in place. Five allocations per command became one: the output `String`.
+- Only `+`, `/` and `=` of the Base64 alphabet need escaping, so the encoder copies the alphanumeric runs wholesale instead of walking every character through the general encoder's `Cow` iterator. That the two agree byte for byte on Base64 input is pinned by a test against `utf8_percent_encode` over random input.
 
 Three baselines are kept in the suite on purpose, so the gains stay reproducible rather than anecdotal:
 
