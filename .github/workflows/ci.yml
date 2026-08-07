@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow reuses these jobs instead of duplicating them.
+  workflow_call:
   workflow_dispatch:
 
 # A newer push to the same branch makes the in-flight run obsolete.

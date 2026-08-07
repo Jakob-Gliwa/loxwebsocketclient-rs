@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Verifies the trusted publisher configuration without consuming a version.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Verify auth and packaging without uploading
+        type: boolean
+        default: true
+
+# A release is never cancelled once it started. The group name deliberately
+# differs from the one ci.yml builds from `github.workflow`, which resolves to
+# this workflow's name when it runs as a reusable workflow below.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The full lint/test/MSRV matrix, against the tagged commit rather than main.
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to crates.io
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Gated on a manual approval; also part of the crates.io OIDC claim.
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tag matches manifest version
+        if: github.ref_type == 'tag'
+        run: |
+          manifest=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          [ "$manifest" = "${GITHUB_REF_NAME#v}" ] \
+            || { echo "tag ${GITHUB_REF_NAME#v} != Cargo.toml $manifest"; exit 1; }
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Exchanges the GitHub OIDC token for a 30-minute crates.io token, so no
+      # long-lived registry credential exists anywhere.
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: Publish
+        run: cargo publish --locked ${{ inputs.dry_run && '--dry-run' || '' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      - name: GitHub Release
+        if: github.ref_type == 'tag'
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
