@@ -47,8 +47,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
 
-/// Depth of the façade → writer command channel.
-const COMMAND_CHANNEL_DEPTH: usize = 32;
+/// Default depth of the façade → writer command channel.
+pub const COMMAND_CHANNEL_DEPTH: usize = 32;
 
 /// Default ceiling on commands in flight at once.
 pub const MAX_PENDING_COMMANDS: usize = 32;
@@ -91,6 +91,14 @@ pub struct ConnectConfig {
     pub max_missed_keepalives: u32,
     /// Ceiling on pipelined commands; further `send_command` calls fail fast.
     pub max_pending_commands: usize,
+    /// Depth of the queue between the façade and the writer task.
+    ///
+    /// The writer encrypts every command individually, so a burst that arrives
+    /// faster than that fills the queue: one inbound message fanning out into
+    /// dozens of controls is enough. Raise this if
+    /// [`LoxClient::try_send_control`] reports [`Error::Backpressure`] on an
+    /// otherwise healthy connection.
+    pub command_channel_depth: usize,
     /// Where to keep the token between process runs. `None` — the default —
     /// means a fresh token is acquired on every start.
     ///
@@ -127,6 +135,7 @@ impl std::fmt::Debug for ConnectConfig {
             .field("read_idle_timeout_secs", &self.read_idle_timeout_secs)
             .field("max_missed_keepalives", &self.max_missed_keepalives)
             .field("max_pending_commands", &self.max_pending_commands)
+            .field("command_channel_depth", &self.command_channel_depth)
             .field("token_store", &self.token_store)
             .field("kill_token_on_stop", &self.kill_token_on_stop)
             .finish()
@@ -158,6 +167,7 @@ impl ConnectConfig {
             read_idle_timeout_secs: READ_IDLE_TIMEOUT_SECS,
             max_missed_keepalives: MAX_MISSED_KEEPALIVES,
             max_pending_commands: MAX_PENDING_COMMANDS,
+            command_channel_depth: COMMAND_CHANNEL_DEPTH,
             token_store: None,
             kill_token_on_stop: true,
         }
@@ -215,7 +225,9 @@ impl<H: LoxHandler> LoxClient<H> {
             None => SharedState::new(),
         };
         let stopped = Arc::new(AtomicBool::new(false));
-        let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_DEPTH);
+        // `mpsc::channel` panics on zero, and a zero-depth queue would be a
+        // configuration mistake rather than a request to drop everything.
+        let (cmd_tx, cmd_rx) = mpsc::channel(cfg.command_channel_depth.max(1));
         let (ready_tx, ready_rx) = oneshot::channel();
         let username = cfg.username.clone();
 
@@ -278,7 +290,12 @@ impl<H: LoxHandler> LoxClient<H> {
     ///
     /// The acknowledgement the Miniserver sends is consumed by an internal
     /// waiter, so it can never complete a concurrent [`Self::send_command`].
+    ///
+    /// Fails with [`Error::NotConnected`] rather than queueing when there is no
+    /// live session; see [`Self::live`]. Waits for room in the command queue
+    /// when there is one — use [`Self::try_send_control`] to be refused instead.
     pub async fn send_control(&self, uuid: &str, value: &str) -> Result<()> {
+        self.require_live()?;
         self.cmd_tx
             .send(IoCommand::Control {
                 uuid: uuid.to_string(),
@@ -288,8 +305,37 @@ impl<H: LoxHandler> LoxClient<H> {
             .map_err(|_| Error::ChannelClosed)
     }
 
+    /// Fire-and-forget control that never waits for room in the queue.
+    ///
+    /// [`Error::Backpressure`] means the writer is not keeping up. A caller
+    /// under a QoS-0 contract needs that answer now, not once the Miniserver is
+    /// back: it can drop the value, coalesce it with the next one, or shed the
+    /// whole burst — all of which are better than a send that resolves minutes
+    /// later with a value nobody wants any more.
+    pub fn try_send_control(&self, uuid: &str, value: &str) -> Result<()> {
+        self.require_live()?;
+        self.cmd_tx
+            .try_send(IoCommand::Control {
+                uuid: uuid.to_string(),
+                value: value.to_string(),
+            })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => {
+                    self.shared
+                        .metrics
+                        .controls_rejected_backpressure
+                        .fetch_add(1, Ordering::Relaxed);
+                    Error::Backpressure
+                }
+                mpsc::error::TrySendError::Closed(_) => Error::ChannelClosed,
+            })
+    }
+
     /// Queue a visualization-password secured control (max 1 pending).
+    ///
+    /// Refuses with [`Error::NotConnected`] off-session, like [`Self::send_control`].
     pub async fn send_visu_control(&self, uuid: &str, value: &str, visu_pw: &str) -> Result<()> {
+        self.require_live()?;
         self.cmd_tx
             .send(IoCommand::VisuControl {
                 uuid: uuid.to_string(),
@@ -298,6 +344,30 @@ impl<H: LoxHandler> LoxClient<H> {
             })
             .await
             .map_err(|_| Error::ChannelClosed)
+    }
+
+    /// Whether a control sent right now would reach a writer.
+    ///
+    /// Racy by nature — the session can end between this call and the next
+    /// send — but enough to skip work that only makes sense while connected.
+    pub fn live(&self) -> bool {
+        self.state() == ConnState::Connected
+    }
+
+    /// Refuse a control there is no session for, counting the refusal.
+    ///
+    /// Deliberately not applied to [`Self::send_command`]. That one is
+    /// request/response: its caller is waiting for an answer either way, and
+    /// the state can still be `Connecting` when a legitimate one goes out.
+    fn require_live(&self) -> Result<()> {
+        if self.live() {
+            return Ok(());
+        }
+        self.shared
+            .metrics
+            .controls_rejected_offline
+            .fetch_add(1, Ordering::Relaxed);
+        Err(Error::NotConnected)
     }
 
     /// Ask the Miniserver whether the current token is still valid.
@@ -411,5 +481,9 @@ mod tests {
         assert!(cfg.read_idle_timeout_secs > cfg.keepalive_secs);
         assert!(cfg.long_backoff_secs > cfg.connect_delay_secs);
         assert!(cfg.max_pending_commands > 0);
+        // Zero would panic `mpsc::channel`; the `.max(1)` in `connect` is a
+        // backstop, not a licence for the default to be wrong.
+        assert!(cfg.command_channel_depth > 0);
+        assert_eq!(cfg.command_channel_depth, COMMAND_CHANNEL_DEPTH);
     }
 }

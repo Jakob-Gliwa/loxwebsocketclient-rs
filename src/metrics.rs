@@ -82,6 +82,11 @@ pub struct LoxMetrics {
     pub unsolicited_responses: u64,
     /// Keepalives sent for which no type-6 answer was seen.
     pub keepalive_misses: u64,
+    /// Controls refused because there was no live session to send them on.
+    pub controls_rejected_offline: u64,
+    /// Controls refused because the command channel had no room. Only
+    /// `try_send_control` produces these; the awaiting form waits instead.
+    pub controls_rejected_backpressure: u64,
     pub messages_received_by_type: [u64; MESSAGE_TYPE_COUNT],
     pub disconnects_by_close_code: HashMap<Option<u16>, u64>,
     pub connected_since_monotonic: Option<Instant>,
@@ -116,6 +121,8 @@ pub(crate) struct MetricsState {
     pub correlation_mismatches: AtomicU64,
     pub unsolicited_responses: AtomicU64,
     pub keepalive_misses: AtomicU64,
+    pub controls_rejected_offline: AtomicU64,
+    pub controls_rejected_backpressure: AtomicU64,
     by_type: [AtomicU64; MESSAGE_TYPE_COUNT],
     by_close_code: Mutex<HashMap<Option<u16>, u64>>,
     connected_since: Mutex<(Option<Instant>, Option<f64>)>,
@@ -172,6 +179,10 @@ impl MetricsState {
             correlation_mismatches: self.correlation_mismatches.load(Ordering::Relaxed),
             unsolicited_responses: self.unsolicited_responses.load(Ordering::Relaxed),
             keepalive_misses: self.keepalive_misses.load(Ordering::Relaxed),
+            controls_rejected_offline: self.controls_rejected_offline.load(Ordering::Relaxed),
+            controls_rejected_backpressure: self
+                .controls_rejected_backpressure
+                .load(Ordering::Relaxed),
             messages_received_by_type: by_type,
             disconnects_by_close_code: lock(&self.by_close_code).clone(),
             connected_since_monotonic: mono,

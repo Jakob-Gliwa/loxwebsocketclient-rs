@@ -92,6 +92,26 @@ pub enum Error {
     #[error("invalid UUID: {0}")]
     InvalidUuid(String),
 
+    /// There is no live session to put a fire-and-forget control on.
+    ///
+    /// Only the writer task of a running session drains the command channel,
+    /// so queueing a control between two sessions would park the caller for the
+    /// whole reconnect delay — up to
+    /// [`long_backoff_secs`](crate::ConnectConfig::long_backoff_secs) — and
+    /// then send a value that is minutes stale. Refusing immediately lets the
+    /// caller decide.
+    #[error("not connected")]
+    NotConnected,
+
+    /// The command channel is full: the writer is not draining it as fast as
+    /// controls arrive. Only [`LoxClient::try_send_control`] reports this;
+    /// [`LoxClient::send_control`] waits for room instead.
+    ///
+    /// [`LoxClient::try_send_control`]: crate::LoxClient::try_send_control
+    /// [`LoxClient::send_control`]: crate::LoxClient::send_control
+    #[error("command channel is full")]
+    Backpressure,
+
     #[error("command channel closed")]
     ChannelClosed,
 }
@@ -152,5 +172,21 @@ impl Error {
             return self;
         }
         Self::Auth(format!("{step}: {self}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Both describe the state of one caller's attempt, not of the connection.
+    /// Classifying either as terminal would let a control refused during a
+    /// reconnect end the client.
+    #[test]
+    fn a_refused_control_says_nothing_about_the_connection() {
+        for e in [Error::NotConnected, Error::Backpressure] {
+            assert!(!e.is_terminal(), "{e}");
+            assert!(!e.needs_long_backoff(), "{e}");
+        }
     }
 }

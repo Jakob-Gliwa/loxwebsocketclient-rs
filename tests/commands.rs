@@ -3,9 +3,10 @@
 mod common;
 
 use common::{FakeMiniserver, Rec, RecordingHandler, SaltPrefix, TEST_VISU_PASSWORD};
-use loxwebsocket::LoxClient;
 use loxwebsocket::crypto::session::SALT_MAX_USE_COUNT;
+use loxwebsocket::{ConnState, Error, LoxClient};
 use std::collections::HashSet;
+use std::time::Duration;
 
 /// Value of `LL.value` in a fake answer, as a string.
 fn ll_value(payload: &[u8]) -> String {
@@ -148,6 +149,111 @@ async fn a_control_ack_does_not_steal_a_concurrent_command_answer() {
             "control {i} missing from {labels:?}"
         );
     }
+
+    let _ = common::within(15, "stop", client.stop()).await;
+}
+
+/// The concrete bug this guards: only a running session's writer task drains
+/// the command channel, so between two sessions nobody does. Once the channel
+/// filled — 32 controls by default, which one fanned-out inbound message
+/// reaches easily — `send_control().await` parked until the Miniserver came
+/// back, up to `long_backoff_secs` later.
+///
+/// The queue here holds two, so a burst of eight would have wedged the caller
+/// on the third.
+#[tokio::test]
+async fn a_control_is_refused_between_sessions_instead_of_parking_the_caller() {
+    let fake = FakeMiniserver::start_default().await;
+    let (handler, mut events) = RecordingHandler::new();
+    let mut cfg = common::test_config(&fake);
+    // Long enough that the whole burst below happens inside the reconnect wait.
+    cfg.connect_delay_secs = 60;
+    cfg.command_channel_depth = 2;
+    let client = common::within(20, "connect", LoxClient::connect(cfg, handler))
+        .await
+        .expect("connect");
+
+    fake.state.session(0).await.close(1000);
+    common::wait_rec(&mut events, 15, |rec| {
+        matches!(rec, Rec::ConnectionClosed(_))
+    })
+    .await;
+    assert_eq!(client.state(), ConnState::Reconnecting);
+
+    for i in 0..8 {
+        let sent = tokio::time::timeout(
+            Duration::from_millis(50),
+            client.send_control(&format!("ctrl{i}"), "on"),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("send_control {i} parked waiting for the reconnect"));
+        assert!(matches!(sent, Err(Error::NotConnected)), "{sent:?}");
+    }
+    assert!(matches!(
+        client.try_send_control("ctrl8", "on"),
+        Err(Error::NotConnected)
+    ));
+    assert!(matches!(
+        common::within(
+            1,
+            "the visu control",
+            client.send_visu_control("u", "on", "pw")
+        )
+        .await,
+        Err(Error::NotConnected)
+    ));
+    assert!(!client.live());
+    assert_eq!(client.metrics().controls_rejected_offline, 10);
+    assert_eq!(client.metrics().controls_rejected_backpressure, 0);
+    // Nothing was queued, so the reconnect does not replay a stale burst.
+    assert_eq!(fake.state.session_count(), 1);
+
+    let _ = common::within(15, "stop", client.stop()).await;
+}
+
+/// The non-blocking form is the whole point of `try_send_control`: on a live
+/// connection it either takes the value or says the writer is behind, and it
+/// never awaits either way.
+#[tokio::test]
+async fn try_send_control_reports_backpressure_rather_than_waiting() {
+    let fake = FakeMiniserver::start_default().await;
+    let (handler, _events) = RecordingHandler::new();
+    let mut cfg = common::test_config(&fake);
+    cfg.command_channel_depth = 1;
+    let client = common::within(20, "connect", LoxClient::connect(cfg, handler))
+        .await
+        .expect("connect");
+
+    // Synchronous, so the writer never gets a chance to drain between calls:
+    // with a queue of one, the burst has to be refused before it is exhausted.
+    let mut accepted = 0usize;
+    let mut refused = 0usize;
+    for i in 0..64 {
+        match client.try_send_control(&format!("burst{i}"), "on") {
+            Ok(()) => accepted += 1,
+            Err(Error::Backpressure) => refused += 1,
+            Err(e) => panic!("unexpected refusal: {e}"),
+        }
+    }
+    assert!(accepted > 0, "the healthy connection took nothing");
+    assert!(refused > 0, "a queue of one absorbed 64 controls");
+    assert_eq!(accepted + refused, 64);
+    assert_eq!(
+        client.metrics().controls_rejected_backpressure,
+        refused as u64
+    );
+    assert_eq!(client.metrics().controls_rejected_offline, 0);
+
+    // What was accepted still reaches the Miniserver.
+    fake.state
+        .wait_until(10, "the accepted controls", move |log| {
+            log.iter()
+                .filter_map(common::Entry::as_command)
+                .filter(|record| record.cmd.contains("/burst"))
+                .count()
+                >= accepted
+        })
+        .await;
 
     let _ = common::within(15, "stop", client.stop()).await;
 }

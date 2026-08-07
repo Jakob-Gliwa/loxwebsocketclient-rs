@@ -462,6 +462,14 @@ async fn session_once<H: LoxHandler>(
     };
     let read_outcome = reader.run(&mut ws_read, handler).await;
 
+    // The session is over the moment the read loop returns, and the writer —
+    // the only reader of the command channel — is about to hand it back. Left
+    // at `Connected` until the reconnect wait, the state would still be telling
+    // `send_control` that there is somebody to queue a control for.
+    if !ctx.stopped.load(Ordering::Relaxed) {
+        ctx.shared.set_state(ConnState::Reconnecting);
+    }
+
     refresher.abort();
     let _ = out_tx.send(WriterMsg::Shutdown).await;
     drop(out_tx);

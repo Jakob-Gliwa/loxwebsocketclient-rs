@@ -122,11 +122,23 @@ Two things worth knowing:
 | `read_idle_timeout_secs` | 150 | Reader idle window, widened automatically for the payload length a message header announces |
 | `max_missed_keepalives` | 3 | Unanswered keepalives tolerated before the session is discarded |
 | `max_pending_commands` | 32 | Ceiling on pipelined commands; further `send_command` calls fail fast |
+| `command_channel_depth` | 32 | Depth of the queue between the façade and the writer task. The writer encrypts each command individually, so one inbound message that fans out into dozens of controls can fill it on a perfectly healthy connection |
 | `long_backoff_secs` | 300 | Delay after close code 4003, 4007 or 4008, and after `Error::NoEventSlots` or `Error::TooManyConnections` |
 | `keepalive_secs` | 60 | Plaintext `keepalive` period |
 | `connect_delay_secs` | 15 | Delay between ordinary reconnect attempts |
 | `command_timeout_secs` | 30 | Encrypted request/response deadline |
 | `max_reconnect_attempts` | 0 | `0` is unlimited. Bounds *consecutive* failures: the budget is cleared by a session that lasted at least 60 s, so a long-lived client is never shut down for reconnecting often, while a Miniserver that accepts the handshake and drops it again still runs into the cap |
+
+### Sending controls
+
+Only a running session's writer task drains the command channel, so between two sessions there is nobody to drain it. Both control methods therefore refuse with `Error::NotConnected` unless the state is `Connected`, rather than queueing a value that would go out — or park its caller — up to `long_backoff_secs` later. `send_command` is deliberately exempt: the handshake and the token refresher use it before the state reaches `Connected`.
+
+| Method | On a full queue | Use when |
+|---|---|---|
+| `send_control(uuid, value).await` | waits for room | the value matters more than the latency |
+| `try_send_control(uuid, value)` | `Err(Error::Backpressure)`, immediately | the caller has a QoS-0 contract and would rather drop or coalesce the value than wait |
+
+`try_send_control` is synchronous and never yields, so a burst can be offered to it in a loop and the refusals counted. Both refusal reasons show up in `LoxMetrics` as `controls_rejected_offline` and `controls_rejected_backpressure`; a steady stream of the latter on a live connection means `command_channel_depth` is too small for the fan-out.
 
 Unless both `receive_updates` and `local_only` are off, each connect attempt is preflighted against `jdev/cfg/apiKey` and `jdev/cfg/api` (both are needed: `hasEventSlots` only appears on the latter, and some firmwares return `LL.value` as a single-quoted string). `hasEventSlots == false` becomes `Error::NoEventSlots` and earns the long backoff, `local == false` under `local_only` becomes `Error::NotLocal` and stops the client outright. An HTTP probe that simply fails is not treated as a verdict — the WebSocket attempt still runs.
 
