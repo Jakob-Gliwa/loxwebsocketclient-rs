@@ -28,15 +28,15 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-webpki-roots = "0.26"
-x509-cert = "0.2"
-aes = "0.8"
-cbc = { version = "0.1", features = ["alloc"] }
+webpki-roots = "1.0"
+x509-cert = "0.3"
+aes = "0.9"
+cbc = { version = "0.2", features = ["alloc"] }
 rsa = { version = "0.9", default-features = false, features = ["std", "pem", "sha1", "sha2"] }
-sha1 = "0.10"
-sha2 = "0.10"
-hmac = "0.12"
-base64 = "0.22"
+sha1 = "0.11"
+sha2 = "0.11"
+hmac = "0.13"
+base64 = "0.23"
 percent-encoding = "2.3"
 sonic-rs = "0.5"
 zerocopy = { version = "0.8", features = ["derive"] }

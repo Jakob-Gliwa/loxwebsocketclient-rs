@@ -9,7 +9,7 @@ use super::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rand::RngCore;
 use rsa::pkcs8::DecodePrivateKey;
 use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
@@ -676,14 +676,16 @@ fn strip_salt(plain: &str) -> &str {
 /// borrowed from the crate: the fake has to be able to disagree with the code
 /// under test about what a command decrypts to.
 fn aes_cbc_decrypt(key: &[u8; 32], iv: &[u8; 16], ciphertext: &[u8]) -> Option<Vec<u8>> {
-    use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::NoPadding};
+    use aes::cipher::KeyIvInit;
+    use aes::cipher::block::BlockModeDecrypt;
+    use aes::cipher::block_padding::NoPadding;
 
     if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
         return None;
     }
     let mut buf = ciphertext.to_vec();
     cbc::Decryptor::<aes::Aes256>::new(key.into(), iv.into())
-        .decrypt_padded_mut::<NoPadding>(&mut buf)
+        .decrypt_padded::<NoPadding>(&mut buf)
         .ok()?;
     // The padding is whatever it takes to fill the last block with zeros; the
     // plaintext is a command string, so trailing NULs are never significant.

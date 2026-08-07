@@ -8,7 +8,8 @@
 
 use crate::error::{Error, Result};
 use aes::Aes256;
-use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::NoPadding};
+use aes::cipher::block::{BlockModeDecrypt, BlockModeEncrypt};
+use aes::cipher::{KeyIvInit, block_padding::NoPadding};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use cbc::{Decryptor, Encryptor};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -203,7 +204,7 @@ pub fn aes_encrypt_zerobyte(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Resul
     let encryptor = Aes256CbcEnc::new(key.into(), iv.into());
     let len = buf.len();
     encryptor
-        .encrypt_padded_mut::<NoPadding>(&mut buf, len)
+        .encrypt_padded::<NoPadding>(&mut buf, len)
         .map_err(|_| Error::crypto("AES encrypt failed"))?;
     Ok(buf)
 }
@@ -216,7 +217,7 @@ pub fn aes_decrypt_zerobyte(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Resul
     let decryptor = Aes256CbcDec::new(key.into(), iv.into());
     let mut buf = data.to_vec();
     decryptor
-        .decrypt_padded_mut::<NoPadding>(&mut buf)
+        .decrypt_padded::<NoPadding>(&mut buf)
         .map_err(|_| Error::crypto("AES decrypt failed"))?;
     while buf.last() == Some(&0) {
         buf.pop();

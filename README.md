@@ -1,6 +1,10 @@
 # loxwebsocket
 
 [![CI](https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/loxwebsocket.svg)](https://crates.io/crates/loxwebsocket)
+[![docs.rs](https://img.shields.io/docsrs/loxwebsocket)](https://docs.rs/loxwebsocket)
+
+> **Pre-1.0.** `0.x` releases may change the public API in a breaking way on a minor version bump, per [SemVer](https://semver.org/#spec-item-4). `ConnectConfig` in particular has grown fields in the past few releases; expect more before `1.0`. Pin an exact version if that is a problem for you.
 
 High-performance Rust WebSocket client for the [Loxone Miniserver](https://www.loxone.com/) (protocol V17.0).
 
@@ -11,7 +15,7 @@ Targets Miniserver firmware v15 and newer; the legacy `gettoken` / `refreshtoken
 | Concern | Choice |
 |---|---|
 | Transport | `tokio` + [`fastwebsockets`](https://github.com/denoland/fastwebsockets), read/write halves split before the Loxone handshake |
-| Hot path | Sync [`LoxHandler`](src/client/handler.rs) callbacks on the reader task (zero-copy borrows) |
+| Hot path | Sync [`LoxHandler`](https://docs.rs/loxwebsocket/latest/loxwebsocket/trait.LoxHandler.html) callbacks on the reader task (zero-copy borrows) |
 | Events | Streamed **per record** — no `HashMap` batching |
 | Encryption | AES-256-CBC **ZeroBytePadding**, RSA PKCS#1 v1.5 session wrap |
 | Commands | Pipelined up to `max_pending_commands`, correlated FIFO against `LL.control` |

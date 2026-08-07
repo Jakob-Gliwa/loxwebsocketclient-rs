@@ -1,7 +1,7 @@
 //! Password / token / visu HMAC helpers (SHA1 | SHA256).
 
 use crate::error::{Error, Result};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha1::Sha1;
 use sha2::Sha256;
 use sonic_rs::JsonValueTrait;

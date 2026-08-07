@@ -181,8 +181,8 @@ pub fn spki_sha256(cert_der: &[u8]) -> Result<[u8; 32]> {
 
 fn spki_sha256_of(cert: &Certificate) -> Result<[u8; 32]> {
     let der = cert
-        .tbs_certificate
-        .subject_public_key_info
+        .tbs_certificate()
+        .subject_public_key_info()
         .to_der()
         .map_err(|e| Error::Tls(format!("SPKI encode: {e}")))?;
     Ok(Sha256::digest(&der).into())
@@ -201,13 +201,13 @@ pub fn spki_sha256_from_pem_chain(pem: &str) -> Result<[u8; 32]> {
         .last()
         .ok_or_else(|| Error::Tls("certificate chain is empty".into()))?;
     for (idx, cert) in chain.iter().enumerate() {
-        let tbs = &cert.tbs_certificate;
+        let tbs = cert.tbs_certificate();
         info!(
             index = idx,
-            subject = %tbs.subject,
-            issuer = %tbs.issuer,
-            not_before = %tbs.validity.not_before.to_date_time(),
-            not_after = %tbs.validity.not_after.to_date_time(),
+            subject = %tbs.subject(),
+            issuer = %tbs.issuer(),
+            not_before = %tbs.validity().not_before.to_date_time(),
+            not_after = %tbs.validity().not_after.to_date_time(),
             "Miniserver certificate"
         );
     }
