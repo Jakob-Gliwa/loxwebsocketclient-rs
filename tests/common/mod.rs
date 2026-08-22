@@ -148,6 +148,9 @@ pub struct FakeConfig {
     pub answer_keepalive: bool,
     /// Reject `checktoken` / `authwithtoken` with LL `401`.
     pub reject_token: bool,
+    /// Refuse `jdev/sys/keyexchange` with this LL code instead of installing
+    /// the session key, the way a Miniserver that is still booting does.
+    pub keyexchange_refusal: Option<u16>,
     /// Send `enablebinstatusupdate` a bare counter instead of an LL envelope,
     /// which some firmwares do.
     pub bare_enable_updates_reply: bool,
@@ -173,6 +176,7 @@ impl Default for FakeConfig {
             token_valid_until: FAR_FUTURE_VALID_UNTIL,
             answer_keepalive: true,
             reject_token: false,
+            keyexchange_refusal: None,
             bare_enable_updates_reply: false,
             tables_before_enable_ack: false,
         }
@@ -414,6 +418,12 @@ pub struct FakeState {
     killed_tokens: Mutex<Vec<String>>,
     /// LL code `checktoken`/`authwithtoken` refuse with, or 0 to accept.
     token_refusal: AtomicU16,
+    /// LL code `authwithtoken` alone refuses with, or 0 to accept.
+    authwithtoken_refusal: AtomicU16,
+    /// LL code `refreshjwt` refuses with, or 0 to accept.
+    refreshjwt_refusal: AtomicU16,
+    /// LL code `checktoken` alone refuses with, or 0 to accept.
+    checktoken_refusal: AtomicU16,
     answer_keepalive: AtomicBool,
     tokens_issued: AtomicU64,
 }
@@ -431,6 +441,9 @@ impl FakeState {
             token: Mutex::new(None),
             killed_tokens: Mutex::new(Vec::new()),
             token_refusal: reject,
+            authwithtoken_refusal: AtomicU16::new(0),
+            refreshjwt_refusal: AtomicU16::new(0),
+            checktoken_refusal: AtomicU16::new(0),
             answer_keepalive: keepalive,
             tokens_issued: AtomicU64::new(0),
         })
@@ -500,12 +513,51 @@ impl FakeState {
         self.token_refusal.store(code, Ordering::Relaxed);
     }
 
+    /// Refuse `authwithtoken` only, leaving `checktoken` accepting; `0` accepts
+    /// again.
+    pub fn set_authwithtoken_refusal(&self, code: u16) {
+        self.authwithtoken_refusal.store(code, Ordering::Relaxed);
+    }
+
+    /// Refuse to extend the token on `refreshjwt`; `0` accepts again.
+    pub fn set_refreshjwt_refusal(&self, code: u16) {
+        self.refreshjwt_refusal.store(code, Ordering::Relaxed);
+    }
+
+    /// Refuse `checktoken` only, leaving `authwithtoken` accepting — what real
+    /// firmware does on a connection that has not authenticated yet. `0`
+    /// accepts again.
+    pub fn set_checktoken_refusal(&self, code: u16) {
+        self.checktoken_refusal.store(code, Ordering::Relaxed);
+    }
+
     pub fn set_answer_keepalive(&self, answer: bool) {
         self.answer_keepalive.store(answer, Ordering::Relaxed);
     }
 
     pub(crate) fn token_refusal(&self) -> Option<String> {
         match self.token_refusal.load(Ordering::Relaxed) {
+            0 => None,
+            code => Some(code.to_string()),
+        }
+    }
+
+    pub(crate) fn authwithtoken_refusal(&self) -> Option<String> {
+        match self.authwithtoken_refusal.load(Ordering::Relaxed) {
+            0 => None,
+            code => Some(code.to_string()),
+        }
+    }
+
+    pub(crate) fn refreshjwt_refusal(&self) -> Option<String> {
+        match self.refreshjwt_refusal.load(Ordering::Relaxed) {
+            0 => None,
+            code => Some(code.to_string()),
+        }
+    }
+
+    pub(crate) fn checktoken_refusal(&self) -> Option<String> {
+        match self.checktoken_refusal.load(Ordering::Relaxed) {
             0 => None,
             code => Some(code.to_string()),
         }

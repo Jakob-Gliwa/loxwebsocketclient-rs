@@ -390,6 +390,11 @@ impl Session {
     }
 
     fn on_key_exchange(&mut self, wire: &str, encoded: &str) -> Vec<Vec<u8>> {
+        // A Miniserver on its way back up accepts the socket before it hands out
+        // session keys, so the refusal lands here — before any token is in play.
+        if let Some(code) = self.state.cfg.keyexchange_refusal {
+            return ll_message(wire, "\"\"", &code.to_string());
+        }
         // The Base64 here is deliberately *not* URI-encoded, so a client that
         // percent-encodes it must fail loudly rather than silently.
         let Ok(ciphertext) = B64.decode(encoded) else {
@@ -473,6 +478,11 @@ impl Session {
             );
         }
         if let Some(rest) = cmd.strip_prefix("authwithtoken/") {
+            // Refused here but not on `checktoken`: the token can die in the
+            // window between the two commands.
+            if let Some(code) = self.state.authwithtoken_refusal() {
+                return (json_string(""), code);
+            }
             return match self.check_token_hash(rest) {
                 Ok(()) => (
                     format!(
@@ -484,6 +494,11 @@ impl Session {
             };
         }
         if let Some(rest) = cmd.strip_prefix("jdev/sys/checktoken/") {
+            // Real firmware answers `400 Bad request` here on a connection that
+            // has not authenticated yet, whatever the token is worth.
+            if let Some(code) = self.state.checktoken_refusal() {
+                return (json_string("Bad request"), code);
+            }
             return match self.check_token_hash(rest) {
                 Ok(()) => (
                     format!(r#"{{"validUntil":{valid_until},"unsecurePass":false}}"#),
@@ -493,6 +508,11 @@ impl Session {
             };
         }
         if let Some(rest) = cmd.strip_prefix("jdev/sys/refreshjwt/") {
+            // A Miniserver that will not extend the token, while the socket
+            // itself stays perfectly healthy.
+            if let Some(code) = self.state.refreshjwt_refusal() {
+                return (json_string(""), code);
+            }
             return match self.check_token_hash(rest) {
                 Ok(()) => {
                     let token = self.state.issue_token();

@@ -7,7 +7,9 @@ minutes ([Trusted Publishing](https://crates.io/docs/trusted-publishing)).
 
 ## Cutting a release
 
-1. Bump `version` in `Cargo.toml`.
+1. Bump `version` in `Cargo.toml` and move the `Unreleased` section of
+   [CHANGELOG.md](CHANGELOG.md) under the new version heading, with the date and
+   the compare link at the bottom of the file.
 2. `cargo update --workspace` so `Cargo.lock` records the new version, then run
    `cargo test --all-targets --locked` and `cargo test --doc --locked`.
 3. Commit, push to `main`, wait for CI to go green.

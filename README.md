@@ -82,9 +82,9 @@ Tokens are held in memory and never exposed through a getter. By default they ar
 
 | Event | Effect on the token |
 |---|---|
-| Transport disconnect, reconnect | Reused via `checktoken` + `authwithtoken` |
+| Transport disconnect, reconnect | Reused via `getkey` + `authwithtoken` |
 | Close code 4004 / 4005 / 4006 (user changed or disabled) | Discarded |
-| `LL` 401 / 403 on `checktoken` / `authwithtoken` | Discarded, new one acquired |
+| Any `authwithtoken` refusal except 423 / 500 / 503 / 901 | Discarded, new one acquired |
 | `LL` 901 (connection limit reached) | **Kept**; the Miniserver is full, which says nothing about the token. Long backoff |
 | Less than 5 minutes of lifetime left | Replaced; the displaced token is killed server-side |
 | `stop()` | `killtoken` (best effort, short timeout) before the close frame, unless `kill_token_on_stop` is off |

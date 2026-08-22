@@ -267,6 +267,74 @@ async fn a_token_close_to_expiry_is_refreshed() {
     let _ = common::within(15, "stop", client.stop()).await;
 }
 
+/// A Miniserver that refuses to extend the token must not leave the client
+/// sitting on a credential that is about to expire.
+///
+/// The refresher used to only `warn!` and go round again — with the token still
+/// in memory and, for a token this close to expiry, a 15 s delay. That is an
+/// unbounded retry loop on a session whose token dies in half a minute. After
+/// three tries it now drops the session; the reconnect re-runs the handshake,
+/// which is the only place that can fall back to username and password.
+///
+/// Slow by construction: three attempts at `TOKEN_REFRESH_MIN_DELAY_SECS` apart
+/// is 45 s before the session is given up on.
+#[tokio::test]
+async fn three_refused_refreshes_drop_the_session_and_reauthenticate() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after 1970")
+        .as_secs() as i64
+        - loxwebsocket::LOXONE_EPOCH;
+    let fake = FakeMiniserver::start(FakeConfig {
+        // Inside the 24 h refresh lead, so the refresher runs straight away.
+        token_valid_until: now + 30,
+        ..FakeConfig::default()
+    })
+    .await;
+    let (handler, mut events) = RecordingHandler::new();
+
+    // The socket stays healthy throughout; only `refreshjwt` is refused.
+    fake.state.set_refreshjwt_refusal(401);
+    let client = common::within(
+        25,
+        "connect",
+        LoxClient::connect(common::test_config(&fake), handler),
+    )
+    .await
+    .expect("connect");
+    assert_eq!(fake.state.tokens_issued(), 1);
+
+    fake.state
+        .wait_until(90, "three refused refreshes", |log| {
+            log.iter()
+                .filter_map(common::Entry::as_command)
+                .filter(|record| record.label == "jdev/sys/refreshjwt" && record.code == "401")
+                .count()
+                >= 3
+        })
+        .await;
+    fake.state.set_refreshjwt_refusal(0);
+
+    // Proof it gave up rather than kept warning: a second session, reached
+    // without anyone closing the first one from the outside.
+    common::wait_rec(&mut events, 30, |rec| matches!(rec, Rec::Reconnected)).await;
+    assert_eq!(client.state(), ConnState::Connected);
+
+    // The expired token cannot be reused, so the reconnect buys a fresh one.
+    assert_eq!(fake.state.tokens_issued(), 2);
+    // And it stopped at three: no fourth attempt was ever sent.
+    assert_eq!(
+        fake.state
+            .commands()
+            .iter()
+            .filter(|record| record.label == "jdev/sys/refreshjwt")
+            .count(),
+        3
+    );
+
+    let _ = common::within(15, "stop", client.stop()).await;
+}
+
 #[tokio::test]
 async fn check_token_round_trips_through_the_command_path() {
     let fake = FakeMiniserver::start_default().await;

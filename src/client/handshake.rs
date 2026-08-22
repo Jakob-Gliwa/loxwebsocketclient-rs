@@ -7,8 +7,8 @@
 
 use crate::auth::{
     CMD_ENABLE_UPDATES, CMD_GET_KEY, CMD_KEY_EXCHANGE, LxToken, apply_valid_until,
-    build_acquire_token_cmd, build_token_hash, cmd_auth_with_token, cmd_check_token, cmd_getkey2,
-    cmd_kill_token, ll_status_error, ll_status_invalidates_token, parse_json, parse_token_response,
+    build_acquire_token_cmd, build_token_hash, cmd_auth_with_token, cmd_getkey2, cmd_kill_token,
+    ll_status_error, ll_status_invalidates_token, parse_json, parse_token_response,
     payload_ll_status, require_ll_ok,
 };
 use crate::client::ConnectConfig;
@@ -61,6 +61,12 @@ impl<H: LoxHandler> Handshake<'_, H> {
 
     /// `jdev/sys/keyexchange/{base64}` — raw Base64, never URI-encoded.
     pub async fn key_exchange(&mut self, session_b64: &str) -> Result<()> {
+        self.exchange(session_b64)
+            .await
+            .map_err(|e| e.in_step("keyexchange"))
+    }
+
+    async fn exchange(&mut self, session_b64: &str) -> Result<()> {
         self.send_text(&format!("{CMD_KEY_EXCHANGE}{session_b64}"))
             .await?;
         let resp = self.read_payload(self.command_timeout()).await?;
@@ -86,10 +92,8 @@ impl<H: LoxHandler> Handshake<'_, H> {
                     debug!("authenticated with the existing token");
                     return Ok(());
                 }
-                None => {
-                    warn!("Miniserver rejected the stored token, acquiring a new one");
-                    shared.clear_token();
-                }
+                // `reuse_token` has already logged which step refused it and why.
+                None => shared.clear_token(),
             }
         }
         let token = self.acquire_token(None).await?;
@@ -110,37 +114,39 @@ impl<H: LoxHandler> Handshake<'_, H> {
         Ok(())
     }
 
-    /// Validate and then use the stored token.
+    /// Authenticate the connection with the stored token.
     ///
     /// `Ok(None)` means the Miniserver refused the token and a fresh one has to
     /// be acquired; `Err` means the exchange itself failed and the session
     /// should be discarded.
+    ///
+    /// There is deliberately no `checktoken` ahead of the `authwithtoken`. It
+    /// reads like a cheap way to find out whether the token is still good, but
+    /// the protocol document does not list it in the authentication flow —
+    /// "Authenticating using tokens" is `getkey` followed by `authwithtoken`,
+    /// full stop. `checktoken` is documented separately, as a way to verify a
+    /// token *without renewing it*, and firmware refuses it with `400 Bad
+    /// request` on a connection that has not authenticated yet. Asking anyway
+    /// cost a live token, and a full `getjwt`, on every single reconnect.
     async fn reuse_token(&mut self, token: &LxToken) -> Result<Option<LxToken>> {
-        let key_resp = self.request(CMD_GET_KEY).await?;
-        let hash = build_token_hash(&key_resp, token)?;
-
-        // checktoken is the cheap way to learn whether authwithtoken can work
-        // at all; a rejection here saves a doomed authentication round trip.
-        let check = self
-            .request(&cmd_check_token(&hash, &self.cfg.username))
-            .await?;
-        match classify(&check) {
-            LlOutcome::Ok => {}
-            LlOutcome::TokenRejected => return Ok(None),
-            LlOutcome::Failed(e) => return Err(e),
-        }
+        let key_resp = self
+            .request(CMD_GET_KEY)
+            .await
+            .map_err(|e| e.in_step("getkey"))?;
+        let hash = build_token_hash(&key_resp, token).map_err(|e| e.in_step("getkey"))?;
 
         let auth = self
             .request(&cmd_auth_with_token(&hash, &self.cfg.username))
-            .await?;
+            .await
+            .map_err(|e| e.in_step("authwithtoken"))?;
         match classify(&auth) {
             LlOutcome::Ok => {
                 let mut token = token.clone();
-                apply_valid_until(&mut token, &auth)?;
+                apply_valid_until(&mut token, &auth).map_err(|e| e.in_step("authwithtoken"))?;
                 Ok(Some(token))
             }
-            LlOutcome::TokenRejected => Ok(None),
-            LlOutcome::Failed(e) => Err(e),
+            LlOutcome::TokenRejected(code) => Ok(refused("authwithtoken", &code)),
+            LlOutcome::Failed(e) => Err(e.in_step("authwithtoken")),
         }
     }
 
@@ -290,17 +296,30 @@ impl<H: LoxHandler> Handshake<'_, H> {
 
 enum LlOutcome {
     Ok,
-    TokenRejected,
+    /// Refused with a status a fresh token can get past; carries the code so
+    /// the log can name it.
+    TokenRejected(String),
     Failed(Error),
 }
 
 fn classify(payload: &[u8]) -> LlOutcome {
     match payload_ll_status(payload) {
         Some(code) if code == "200" => LlOutcome::Ok,
-        Some(code) if ll_status_invalidates_token(&code) => LlOutcome::TokenRejected,
+        Some(code) if ll_status_invalidates_token(&code) => LlOutcome::TokenRejected(code),
         Some(code) => LlOutcome::Failed(ll_status_error(&code)),
         None => LlOutcome::Failed(Error::protocol("response is not an LL envelope")),
     }
+}
+
+/// Report a refused token and answer `reuse_token` with "acquire a fresh one".
+///
+/// Worth a `warn` rather than a `debug`: on a healthy connection this happens
+/// at most once per token lifetime, and if it starts happening on every
+/// reconnect it is the first sign that the fresh authentication behind it is
+/// papering over something.
+fn refused(step: &str, code: &str) -> Option<LxToken> {
+    warn!("{step} refused the stored token with LL status {code}, acquiring a new one");
+    None
 }
 
 #[cfg(test)]
@@ -316,7 +335,7 @@ mod tests {
         for code in ["401", "403"] {
             let body = format!(r#"{{"LL":{{"code":"{code}"}}}}"#);
             assert!(
-                matches!(classify(body.as_bytes()), LlOutcome::TokenRejected),
+                matches!(classify(body.as_bytes()), LlOutcome::TokenRejected(ref got) if got == code),
                 "{code} should invalidate the token"
             );
         }
@@ -339,6 +358,18 @@ mod tests {
         assert!(matches!(
             refused,
             LlOutcome::Failed(Error::TooManyConnections)
+        ));
+    }
+
+    /// A Miniserver that has just restarted answers `checktoken` with 400
+    /// instead of 401. Classifying that as an ordinary failure kept the dead
+    /// token, so every following reconnect presented it again and got the same
+    /// 400 — a loop only a process restart broke out of.
+    #[test]
+    fn a_restarted_miniserver_still_costs_the_token() {
+        assert!(matches!(
+            classify(br#"{"LL":{"code":"400"}}"#),
+            LlOutcome::TokenRejected(ref code) if code == "400"
         ));
     }
 }

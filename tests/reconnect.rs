@@ -24,7 +24,7 @@ async fn wait_sessions(fake: &FakeMiniserver, count: usize) {
 /// Miniserver's storage (it keeps a few dozen at most).
 ///
 /// After a server-side close the client must re-authenticate with the token it
-/// already has — `checktoken`/`authwithtoken`, never a second `getjwt`.
+/// already has — `getkey` + `authwithtoken`, never a second `getjwt`.
 #[tokio::test]
 async fn a_reconnect_reuses_the_token_instead_of_asking_for_a_new_one() {
     let fake = FakeMiniserver::start_default().await;
@@ -68,8 +68,7 @@ async fn a_reconnect_reuses_the_token_instead_of_asking_for_a_new_one() {
         .map(|record| record.label)
         .collect();
     assert!(
-        second.iter().any(|label| label == "authwithtoken")
-            || second.iter().any(|label| label == "jdev/sys/checktoken"),
+        second.iter().any(|label| label == "authwithtoken"),
         "session 1 commands: {second:?}"
     );
     assert_eq!(client.state(), ConnState::Connected);
@@ -321,9 +320,9 @@ async fn dropping_the_client_shuts_the_io_task_down() {
     assert_eq!(fake.state.killed_tokens().len(), 1);
 }
 
-/// A `checktoken` refused with `901` means the Miniserver is out of connection
-/// slots, not that the token is bad. The client used to treat it as a rejection
-/// and ask for a replacement over the very connection just refused.
+/// An `authwithtoken` refused with `901` means the Miniserver is out of
+/// connection slots, not that the token is bad. The client used to treat it as a
+/// rejection and ask for a replacement over the very connection just refused.
 #[tokio::test]
 async fn the_connection_limit_does_not_cost_the_token() {
     let fake = FakeMiniserver::start_default().await;
@@ -339,10 +338,10 @@ async fn the_connection_limit_does_not_cost_the_token() {
     fake.state.set_token_refusal(901);
     fake.state.session(0).await.close(1006);
     fake.state
-        .wait_until(20, "a checktoken refused with 901", |log| {
+        .wait_until(20, "an authwithtoken refused with 901", |log| {
             log.iter()
                 .filter_map(Entry::as_command)
-                .any(|record| record.label == "jdev/sys/checktoken" && record.code == "901")
+                .any(|record| record.label == "authwithtoken" && record.code == "901")
         })
         .await;
     fake.state.set_token_refusal(0);
@@ -381,6 +380,124 @@ async fn reconnect_attempts_are_capped() {
     assert_eq!(fake.state.session_count(), 2);
 
     let _ = common::within(15, "stop", client.stop()).await;
+}
+
+/// The same fallback, for the code a restarting Miniserver actually sends.
+///
+/// Observed after a `1012` close: the refusal came back `400`, which was not in
+/// the "token is dead" set, so the session failed with the token still in
+/// memory. Every reconnect then re-presented it and got the same `400` — the
+/// client never reached the `getjwt` that would have healed it, and only a
+/// process restart broke the loop.
+#[tokio::test]
+async fn a_restart_refusal_does_not_become_a_reconnect_loop() {
+    let fake = FakeMiniserver::start_default().await;
+    let (handler, mut events) = RecordingHandler::new();
+    let mut cfg = common::test_config(&fake);
+    cfg.connect_delay_secs = 0;
+    let client = common::within(20, "connect", LoxClient::connect(cfg, handler))
+        .await
+        .expect("connect");
+    assert_eq!(fake.state.tokens_issued(), 1);
+
+    // What the Miniserver does on the way back up: refuse the stored token with
+    // 400 rather than 401, then start accepting again.
+    fake.state.set_authwithtoken_refusal(400);
+    fake.state.session(0).await.close(1012);
+    fake.state
+        .wait_until(25, "an authwithtoken refused with 400", |log| {
+            log.iter()
+                .filter_map(Entry::as_command)
+                .any(|record| record.label == "authwithtoken" && record.code == "400")
+        })
+        .await;
+    fake.state.set_authwithtoken_refusal(0);
+
+    // Healing without the process restart: a second `getjwt` over a live session.
+    common::wait_rec(&mut events, 30, |rec| matches!(rec, Rec::Reconnected)).await;
+    fake.state
+        .wait_until(20, "a replacement token", |log| {
+            log.iter()
+                .filter_map(Entry::as_command)
+                .filter(|record| record.label == "jdev/sys/getjwt")
+                .count()
+                >= 2
+        })
+        .await;
+    assert_eq!(client.state(), ConnState::Connected);
+
+    let _ = common::within(15, "stop", client.stop()).await;
+}
+
+/// The reconnect must not send a `checktoken` before the `authwithtoken`.
+///
+/// This is the bug the reported incident actually was. The handshake used to
+/// pre-flight the stored token with `checktoken`, which the protocol document
+/// does not list in the authentication flow at all — and real firmware answers
+/// it with `400 Bad request` on a connection that has not authenticated yet.
+/// So every reconnect that had a token asked a question the Miniserver refuses
+/// to answer, took the refusal for a verdict on the token, and failed the
+/// session with the token still in memory. The first connect of a process was
+/// fine (no token, straight to `getjwt`); every reconnect after it was wedged.
+///
+/// The fake refuses `checktoken` exactly the way the real one does, so the only
+/// way to pass is not to ask.
+#[tokio::test]
+async fn a_reconnect_does_not_pre_flight_the_token_with_checktoken() {
+    let fake = FakeMiniserver::start_default().await;
+    let (handler, mut events) = RecordingHandler::new();
+    let mut cfg = common::test_config(&fake);
+    cfg.connect_delay_secs = 0;
+    let client = common::within(20, "connect", LoxClient::connect(cfg, handler))
+        .await
+        .expect("connect");
+    assert_eq!(fake.state.tokens_issued(), 1);
+
+    fake.state.set_checktoken_refusal(400);
+    fake.state.session(0).await.close(1012);
+    common::wait_rec(&mut events, 30, |rec| matches!(rec, Rec::Reconnected)).await;
+    wait_sessions(&fake, 2).await;
+
+    assert_eq!(
+        fake.state.count("jdev/sys/checktoken"),
+        0,
+        "the handshake asked a question the Miniserver refuses pre-auth: {:#?}",
+        fake.state.commands()
+    );
+    // The token survived, so no replacement was needed.
+    assert_eq!(fake.state.tokens_issued(), 1);
+    assert_eq!(fake.state.count("jdev/sys/getjwt"), 1);
+    assert_eq!(client.state(), ConnState::Connected);
+
+    let _ = common::within(15, "stop", client.stop()).await;
+}
+
+/// A Miniserver that is still booting accepts the socket but refuses to install
+/// a session key. That failure has nothing to do with the token, so the only
+/// thing the client owes the operator is an error that names the step — the
+/// incident it was mistaken for cost an evening of looking at the token path.
+#[tokio::test]
+async fn a_refused_keyexchange_names_the_step_it_failed_at() {
+    let fake = FakeMiniserver::start(FakeConfig {
+        keyexchange_refusal: Some(400),
+        ..FakeConfig::default()
+    })
+    .await;
+    let (handler, _events) = RecordingHandler::new();
+
+    let error = common::within(
+        20,
+        "the refused connect",
+        LoxClient::connect(common::test_config(&fake), handler),
+    )
+    .await
+    .expect_err("connect must fail");
+
+    let rendered = error.to_string();
+    assert!(rendered.contains("keyexchange"), "{rendered}");
+    assert!(rendered.contains("400"), "{rendered}");
+    // It never got as far as the token: no `getjwt`, nothing to invalidate.
+    assert_eq!(fake.state.count("jdev/sys/getjwt"), 0);
 }
 
 /// A Miniserver that has forgotten the token answers `401` on `authwithtoken`;

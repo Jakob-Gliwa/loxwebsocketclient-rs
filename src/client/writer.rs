@@ -188,6 +188,10 @@ impl Writer {
     fn on_io_command(&mut self, cmd: IoCommand) -> Outgoing {
         match cmd {
             IoCommand::Stop => Outgoing::Close,
+            // Not `Close`: that kills the token and stops the client. Dropping
+            // the session the same way an unanswered keepalive does leaves the
+            // supervisor free to reconnect and authenticate again.
+            IoCommand::DropSession => Outgoing::Stop,
             IoCommand::Encrypted { cmd, resp } => {
                 self.shared
                     .metrics

@@ -80,13 +80,23 @@ pub fn ll_status_hint(code: &str) -> &'static str {
 
 /// Whether an LL status code means the token itself is no longer usable.
 ///
-/// Deliberately narrow. 901 is *not* in this set even though it is a refusal:
-/// it reports that the Miniserver is at its connection limit, which says
-/// nothing about the token. Discarding one there would throw away a valid
-/// token and then ask for a replacement over the very connection the
-/// Miniserver just said it has no room for.
+/// The set is defined by its complement: a refusal keeps the token only when it
+/// demonstrably describes something *other* than the token — the Miniserver's
+/// own state (500, 503, 901) or the user's account (423). Discarding one on 901
+/// would be the clearest mistake: it would throw away a valid token and then ask
+/// for a replacement over the very connection the Miniserver just said it has no
+/// room for.
+///
+/// Everything else counts, including codes this crate has no name for. A
+/// Miniserver has more than one way to say "not with this token" — one coming
+/// back up after a restart answers `checktoken` with 400 rather than 401 — and
+/// the client cannot enumerate them all. The two mistakes are not symmetric:
+/// treating a live token as dead costs one `getjwt` round trip, while treating a
+/// dead one as live costs the connection for good, because every reconnect
+/// presents the same token, is refused the same way, and never falls back to
+/// username and password.
 pub fn ll_status_invalidates_token(code: &str) -> bool {
-    matches!(code, "401" | "403")
+    !matches!(code, "200" | "423" | "500" | "503" | "901")
 }
 
 /// The error a non-200 LL status maps to.
@@ -325,11 +335,26 @@ mod tests {
         assert!(ll_status_invalidates_token("403"));
         // 901 is the connection limit, not a verdict on the token. Discarding
         // it here would ask for a replacement over a connection the Miniserver
-        // just refused.
+        // just refused. 500 and 503 report the Miniserver's own state, 423 the
+        // user's — none of the four is about the credential.
         assert!(!ll_status_invalidates_token("901"));
         assert!(!ll_status_invalidates_token("500"));
         assert!(!ll_status_invalidates_token("503"));
+        assert!(!ll_status_invalidates_token("423"));
         assert!(!ll_status_invalidates_token("200"));
+    }
+
+    /// A Miniserver coming back up answers `checktoken` with 400, not 401. That
+    /// used to leave the token in place, so every reconnect presented it again
+    /// and the client never fell back to username and password.
+    #[test]
+    fn an_unnamed_refusal_still_costs_the_token() {
+        for code in ["400", "404", "420", "412", ""] {
+            assert!(
+                ll_status_invalidates_token(code),
+                "{code:?} must fall back to a fresh authentication"
+            );
+        }
     }
 
     #[test]

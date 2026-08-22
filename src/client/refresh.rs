@@ -20,18 +20,55 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, warn};
 
+/// Consecutive refresh failures before the session is given up on.
+///
+/// A refresh only runs inside the last day of a token's life, so the failures
+/// this counts are not a background annoyance: the credential the session runs
+/// on is expiring and the Miniserver will not extend it. Retrying twice covers
+/// a Miniserver that is briefly busy; past that, the answer is not going to
+/// change on this connection.
+const MAX_REFRESH_ATTEMPTS: u32 = 3;
+
 /// Refresh the session token until the task is aborted with the session.
+///
+/// After [`MAX_REFRESH_ATTEMPTS`] consecutive failures the session is dropped
+/// on purpose. The reconnect that follows re-runs the handshake, which — unlike
+/// this task — can tell a dead token from a live one and fall back to a fresh
+/// authentication. Staying put instead would keep a session alive on a
+/// credential that is about to expire, and the client would only find out when
+/// the Miniserver closes the connection on its own.
 pub(crate) async fn run_refresher(
     username: String,
     shared: Arc<SharedState>,
     cmd_tx: mpsc::Sender<IoCommand>,
 ) {
+    let mut failures: u32 = 0;
     loop {
-        sleep(next_refresh_delay(&shared)).await;
+        // A failed attempt has already consumed its slot in the schedule:
+        // recomputing it would either hammer the Miniserver or — for a token
+        // with no announced expiry — wait another two days between tries.
+        let delay = if failures == 0 {
+            next_refresh_delay(&shared)
+        } else {
+            Duration::from_secs(TOKEN_REFRESH_MIN_DELAY_SECS as u64)
+        };
+        sleep(delay).await;
+
         match refresh_once(&username, &shared, &cmd_tx).await {
-            Ok(true) => debug!("token refreshed"),
-            Ok(false) => {}
-            Err(e) => warn!("token refresh failed: {e}"),
+            Ok(true) => {
+                failures = 0;
+                debug!("token refreshed");
+            }
+            Ok(false) => failures = 0,
+            Err(e) => {
+                failures += 1;
+                warn!("token refresh failed (attempt {failures}/{MAX_REFRESH_ATTEMPTS}): {e}");
+                if failures >= MAX_REFRESH_ATTEMPTS {
+                    warn!("giving up on the token, dropping the session to re-authenticate");
+                    let _ = cmd_tx.send(IoCommand::DropSession).await;
+                    return;
+                }
+            }
         }
     }
 }

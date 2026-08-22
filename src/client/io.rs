@@ -52,6 +52,12 @@ pub enum IoCommand {
         value: String,
         visu_pw: String,
     },
+    /// End this session and let the supervisor build a new one.
+    ///
+    /// Distinct from [`IoCommand::Stop`], which ends the *client*: this is the
+    /// refresher's way of saying that the connection is still fine but the
+    /// credential on it is not, and only a fresh handshake can fix that.
+    DropSession,
     Stop,
 }
 
