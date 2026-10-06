@@ -9,6 +9,25 @@ file was introduced.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-06
+
+### Security
+
+- `rustls` is updated to 0.23.45, which fixes
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285): TLS 1.3
+  handshake messages were accepted at the wrong encryption level when they
+  followed a key-changing message in the same record. The handshake transcript
+  stays authenticated, so this does not let a network attacker alter or complete
+  a handshake (CVSS 5.3). The crate's own requirement (`rustls = "0.23"`) already
+  allowed the fixed version; consumers with an older `Cargo.lock` need
+  `cargo update -p rustls`.
+
+### Changed
+
+- Refreshed the remaining dependencies to their latest versions compatible with
+  Rust 1.86, among them `rustls-webpki` 0.103.15, `tokio-rustls` 0.26.6,
+  `hyper` 1.11.1, `tokio` 1.53.2 and `sonic-rs` 0.5.10. No API changes.
+
 ## [0.3.0] - 2026-08-22
 
 ### Fixed
@@ -78,7 +97,8 @@ file was introduced.
 
 Initial release.
 
-[Unreleased]: https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/releases/tag/v0.1.0

@@ -2,7 +2,7 @@
 
 [package]
 name = "loxwebsocket"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 # Edition 2024 requires 1.85; the committed Cargo.lock separately pulls
 # `url` → `idna` → `icu_*`, which need 1.86.
