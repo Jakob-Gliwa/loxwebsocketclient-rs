@@ -42,12 +42,10 @@ impl LoxHasher {
 impl Hasher for LoxHasher {
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        let mut chunks = bytes.chunks_exact(8);
-        for chunk in &mut chunks {
-            // `chunks_exact(8)` guarantees the length, so the conversion holds.
-            self.add(u64::from_ne_bytes(chunk.try_into().unwrap_or_default()));
+        let (chunks, rest) = bytes.as_chunks::<8>();
+        for chunk in chunks {
+            self.add(u64::from_ne_bytes(*chunk));
         }
-        let rest = chunks.remainder();
         if !rest.is_empty() {
             let mut buf = [0u8; 8];
             buf[..rest.len()].copy_from_slice(rest);

@@ -61,7 +61,7 @@ jobs:
         run: cargo test --doc --locked
 
   msrv:
-    name: MSRV 1.86
+    name: MSRV 1.99
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -69,10 +69,10 @@ jobs:
 
       # `--locked` matters here: the MSRV holds for the committed dependency
       # graph, not for whatever a fresh resolve would pick.
-      - name: Install 1.86
-        run: rustup toolchain install 1.86 --profile minimal
+      - name: Install 1.99
+        run: rustup toolchain install 1.99 --profile minimal
 
       - uses: Swatinem/rust-cache@v2
 
       - name: Check
-        run: cargo +1.86 check --all-targets --locked
+        run: cargo +1.99 check --all-targets --locked

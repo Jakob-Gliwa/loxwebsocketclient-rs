@@ -2,11 +2,11 @@
 
 [package]
 name = "loxwebsocket"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
-# Edition 2024 requires 1.85; the committed Cargo.lock separately pulls
-# `url` → `idna` → `icu_*`, which need 1.86.
-rust-version = "1.86"
+# The committed Cargo.lock needs at least 1.87 (`ctutils` 0.4.4+, the
+# RUSTSEC-2026-0385 fix) and is resolved against 1.99; `as_chunks` needs 1.88.
+rust-version = "1.99"
 description = "High-performance Loxone Miniserver WebSocket client: zero-copy binary event tables, token auth and TLS pinning. Direct connections only — CloudDNS remote connect is not implemented."
 license = "MIT"
 readme = "README.md"

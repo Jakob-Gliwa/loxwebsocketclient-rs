@@ -146,7 +146,7 @@ impl Liveness {
         let sent = self.sent.load(Ordering::Relaxed);
         let _ = self
             .acked
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |acked| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |acked| {
                 (acked < sent).then_some(acked + 1)
             });
         lock(&self.sent_at).take()

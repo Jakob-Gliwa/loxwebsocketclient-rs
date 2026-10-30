@@ -106,10 +106,10 @@ impl<H: LoxHandler> Handshake<'_, H> {
         let resp = self.request(CMD_ENABLE_UPDATES).await?;
         // The answer is the current update counter, not an LL envelope on every
         // firmware, so only an explicit error status is treated as failure.
-        if let Some(code) = payload_ll_status(&resp) {
-            if code != "200" {
-                return Err(ll_status_error(&code).in_step("enablebinstatusupdate"));
-            }
+        if let Some(code) = payload_ll_status(&resp)
+            && code != "200"
+        {
+            return Err(ll_status_error(&code).in_step("enablebinstatusupdate"));
         }
         Ok(())
     }
@@ -152,10 +152,10 @@ impl<H: LoxHandler> Handshake<'_, H> {
 
     /// Acquire a fresh token, killing `displaced` first when there is one.
     async fn acquire_token(&mut self, displaced: Option<&LxToken>) -> Result<LxToken> {
-        if let Some(old) = displaced {
-            if let Err(e) = self.kill_token(old).await {
-                debug!("could not kill the displaced token: {e}");
-            }
+        if let Some(old) = displaced
+            && let Err(e) = self.kill_token(old).await
+        {
+            debug!("could not kill the displaced token: {e}");
         }
 
         let getkey2 = self

@@ -253,7 +253,7 @@ pub(crate) fn cmd_label(cmd: &str) -> &str {
 
 /// Read eight bytes as a little-endian word, so byte `i` sits in bits `8*i`.
 ///
-/// Only ever fed a `chunks_exact(8)` item.
+/// Only ever fed an eight-byte slice.
 #[inline]
 fn word_at(chunk: &[u8]) -> u64 {
     let mut buf = [0u8; 8];
@@ -282,18 +282,17 @@ const fn zero_byte_mask(word: u64) -> u64 {
 #[inline]
 fn find_either(haystack: &[u8], a: u8, b: u8) -> Option<usize> {
     let (rep_a, rep_b) = (repeat_byte(a), repeat_byte(b));
-    let mut chunks = haystack.chunks_exact(8);
+    let (chunks, remainder) = haystack.as_chunks::<8>();
     let mut offset = 0;
-    for chunk in chunks.by_ref() {
-        let word = word_at(chunk);
+    for chunk in chunks {
+        let word = u64::from_le_bytes(*chunk);
         let mask = zero_byte_mask(word ^ rep_a) | zero_byte_mask(word ^ rep_b);
         if mask != 0 {
             return Some(offset + (mask.trailing_zeros() / 8) as usize);
         }
         offset += 8;
     }
-    chunks
-        .remainder()
+    remainder
         .iter()
         .position(|x| *x == a || *x == b)
         .map(|i| offset + i)

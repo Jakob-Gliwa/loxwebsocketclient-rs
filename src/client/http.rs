@@ -318,10 +318,10 @@ pub fn parse_api_info(payload: &[u8]) -> Result<ApiInfo> {
 
 /// Parse an object that may use single instead of double quotes.
 fn parse_relaxed_object(raw: &str) -> Result<Value> {
-    if let Ok(v) = sonic_rs::from_str::<Value>(raw) {
-        if v.is_object() {
-            return Ok(v);
-        }
+    if let Ok(v) = sonic_rs::from_str::<Value>(raw)
+        && v.is_object()
+    {
+        return Ok(v);
     }
     let normalized = raw.replace('\'', "\"");
     let v: Value =

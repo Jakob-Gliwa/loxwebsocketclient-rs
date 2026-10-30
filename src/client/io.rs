@@ -355,13 +355,13 @@ async fn session_once<H: LoxHandler>(
         bail!(e);
     }
 
-    if ctx.tls.needs_pin_bootstrap() {
-        if let Err(e) = ctx.http.bootstrap_pin(&cfg.username, &cfg.password).await {
-            if matches!(e, Error::TlsPinMismatch { .. }) {
-                bail!(e);
-            }
-            warn!("could not derive certificate pin from getcertificate: {e}");
+    if ctx.tls.needs_pin_bootstrap()
+        && let Err(e) = ctx.http.bootstrap_pin(&cfg.username, &cfg.password).await
+    {
+        if matches!(e, Error::TlsPinMismatch { .. }) {
+            bail!(e);
         }
+        warn!("could not derive certificate pin from getcertificate: {e}");
     }
 
     let keys = SessionKeys::generate();
@@ -401,10 +401,10 @@ async fn session_once<H: LoxHandler>(
         if let Err(e) = handshake.authenticate(&ctx.shared).await {
             bail!(e);
         }
-        if cfg.receive_updates {
-            if let Err(e) = handshake.enable_updates().await {
-                bail!(e);
-            }
+        if cfg.receive_updates
+            && let Err(e) = handshake.enable_updates().await
+        {
+            bail!(e);
         }
     }
 

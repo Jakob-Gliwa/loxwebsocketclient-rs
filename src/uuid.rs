@@ -178,7 +178,11 @@ impl LoxoneUuid {
                 ));
             }
             let i = nibbles / 2;
-            raw[i] = if nibbles % 2 == 0 { v << 4 } else { raw[i] | v };
+            raw[i] = if nibbles.is_multiple_of(2) {
+                v << 4
+            } else {
+                raw[i] | v
+            };
             nibbles += 1;
         }
         if nibbles != 32 {

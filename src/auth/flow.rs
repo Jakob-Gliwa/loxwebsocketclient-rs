@@ -209,10 +209,10 @@ pub fn apply_valid_until(token: &mut LxToken, payload: &[u8]) -> Result<()> {
         .get("value")
         .ok_or_else(|| Error::protocol("missing LL.value"))?;
     token.valid_until = read_valid_until(value)?;
-    if let Some(new_tok) = value.get("token").and_then(|v| v.as_str()) {
-        if !new_tok.is_empty() {
-            token.token = new_tok.to_string();
-        }
+    if let Some(new_tok) = value.get("token").and_then(|v| v.as_str())
+        && !new_tok.is_empty()
+    {
+        token.token = new_tok.to_string();
     }
     Ok(())
 }

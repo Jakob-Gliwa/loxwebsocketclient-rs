@@ -311,7 +311,7 @@ pub fn aes_encrypt_zerobyte(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Resul
 
 /// AES-256-CBC decrypt and strip trailing NUL (`rstrip(0)`).
 pub fn aes_decrypt_zerobyte(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Result<Vec<u8>> {
-    if data.len() % 16 != 0 {
+    if !data.len().is_multiple_of(16) {
         return Err(Error::crypto("ciphertext length not multiple of 16"));
     }
     let decryptor = Aes256CbcDec::new(key.into(), iv.into());

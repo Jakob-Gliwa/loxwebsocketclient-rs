@@ -9,6 +9,38 @@ file was introduced.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-30
+
+### Security
+
+- `rustls` 0.23.46 fixes RUSTSEC-2026-0346 (`Debug` impls for client session
+  values exposed TLS secrets), RUSTSEC-2026-0347 (buffered application data sent
+  to the outer server after ECH rejection), RUSTSEC-2026-0348 (Brotli
+  certificate decompression could allocate up to 1 GiB before authentication)
+  and RUSTSEC-2026-0349 (unauthenticated `ServerHello` could downgrade later
+  connections to classical key exchange).
+- `rustls-webpki` 0.103.16 fixes RUSTSEC-2026-0382 (certificate verification
+  could accept distrusted intermediates) and `webpki-roots` 1.0.11 fixes
+  RUSTSEC-2026-0381 (bundled roots trusted distrusted emSign intermediates).
+- `ctutils` 0.4.7, pulled in through `digest`, fixes RUSTSEC-2026-0385
+  (non-constant-time mask generation). The crate only hashes and computes HMACs
+  and never compares MACs, so this was not reachable from its own code.
+- `tokio` 1.54.1 replaces a release flagged as unsound for `AsyncFd`
+  (RUSTSEC-2026-0386); this crate does not use `AsyncFd`.
+
+### Changed
+
+- **MSRV raised from 1.86 to 1.99.** The `ctutils` fix needs Rust 1.87, and the
+  dependency graph is now resolved against the current toolchain instead of the
+  oldest one that happens to work. The CI job follows.
+- Remaining dependencies refreshed (`uuid` 1.29, `aes` 0.9.3, `sha2` 0.11.1,
+  `icu_*` 2.4). `rand` stays on 0.8 on purpose: `rsa` 0.9 and `fastwebsockets`
+  are built against `rand_core` 0.6, so 0.10 would only add a second copy.
+- Internal changes for the Clippy lints of Rust 1.99: collapsed `if` chains,
+  `is_multiple_of`, `Atomic::try_update` instead of the deprecated
+  `fetch_update`, and `as_chunks::<8>()` in the eight-byte scanners of
+  `pending` and `collect`. No behavioural change.
+
 ## [0.3.1] - 2026-10-06
 
 ### Security
@@ -97,7 +129,8 @@ file was introduced.
 
 Initial release.
 
-[Unreleased]: https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Jakob-Gliwa/loxwebsocketclient-rs/compare/v0.1.0...v0.2.0

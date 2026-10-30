@@ -225,10 +225,10 @@ impl CommandRecord {
                 };
             }
         }
-        if let Some(rest) = self.salted.strip_prefix("salt/") {
-            if let Some((salt, _)) = rest.split_once('/') {
-                return SaltPrefix::Same(salt.to_string());
-            }
+        if let Some(rest) = self.salted.strip_prefix("salt/")
+            && let Some((salt, _)) = rest.split_once('/')
+        {
+            return SaltPrefix::Same(salt.to_string());
         }
         SaltPrefix::None
     }

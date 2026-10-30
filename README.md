@@ -8,7 +8,7 @@
 
 High-performance Rust WebSocket client for the [Loxone Miniserver](https://www.loxone.com/) (protocol V17.0).
 
-Targets Miniserver firmware v15 and newer; the legacy `gettoken` / `refreshtoken` paths are gone. Edition 2024, MSRV 1.86 (verified in CI against the committed `Cargo.lock`).
+Targets Miniserver firmware v15 and newer; the legacy `gettoken` / `refreshtoken` paths are gone. Edition 2024, MSRV 1.99 (verified in CI against the committed `Cargo.lock`).
 
 ## Design
 

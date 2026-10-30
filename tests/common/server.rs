@@ -700,7 +700,7 @@ fn aes_cbc_decrypt(key: &[u8; 32], iv: &[u8; 16], ciphertext: &[u8]) -> Option<V
     use aes::cipher::block::BlockModeDecrypt;
     use aes::cipher::block_padding::NoPadding;
 
-    if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
+    if ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
         return None;
     }
     let mut buf = ciphertext.to_vec();
