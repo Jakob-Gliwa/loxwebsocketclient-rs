@@ -43,7 +43,7 @@ zerocopy = { version = "0.8", features = ["derive"] }
 thiserror = "2"
 tracing = "0.1"
 bytes = "1"
-rand = "0.8"
+rand = "0.10"
 url = "2"
 hex = "0.4"
 
