@@ -1,0 +1,35 @@
+# Weekly dependency PRs. Semver-major bumps stay separate because they usually
+# need code changes. CI's MSRV job (`cargo +1.99 check --locked`) rejects lockfile bumps
+# that would raise the effective minimum Rust version.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    # Patch and minor are grouped separately so that the patch PR carries a
+    # pure semver-patch update type, which dependabot-auto-merge.yml merges.
+    groups:
+      cargo-patch:
+        update-types: [patch]
+      cargo-minor:
+        update-types: [minor]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Europe/Berlin
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
