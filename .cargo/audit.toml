@@ -7,6 +7,7 @@
 # not appear outside the unit tests.
 #
 # There is no fixed release on the 0.9 line; drop this entry once `rsa` 0.10
-# is out and the crate has moved to it.
+# is out and the crate has moved to it, together with the `rand` major-version
+# ignore in .github/dependabot.yml.
 [advisories]
 ignore = ["RUSTSEC-2023-0071"]

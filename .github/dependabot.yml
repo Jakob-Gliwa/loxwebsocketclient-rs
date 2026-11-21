@@ -20,6 +20,12 @@ updates:
         update-types: [patch]
       cargo-minor:
         update-types: [minor]
+    ignore:
+      # rand 0.9+ breaks the RSA code in src/crypto, which builds on rsa 0.9 and
+      # the rand 0.8 RNG traits. Drop this together with the RUSTSEC-2023-0071
+      # entry in .cargo/audit.toml once the crate moves to rsa 0.10.
+      - dependency-name: rand
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
